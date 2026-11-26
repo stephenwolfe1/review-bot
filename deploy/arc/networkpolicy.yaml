@@ -1,0 +1,27 @@
+# Limits review-bot runner pods to DNS, the model server and public HTTPS
+# (GitHub). Everything else on your private network is blocked. Set the
+# model server's address and port below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: review-bot-runner-egress
+  namespace: arc-runners
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: review-bot
+  policyTypes: [Egress]
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock: { cidr: 10.0.0.10/32 } # model server
+      ports:
+        - { protocol: TCP, port: 11434 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
+      ports:
+        - { protocol: TCP, port: 443 }

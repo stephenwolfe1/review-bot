@@ -1,0 +1,55 @@
+# Copy to .github/workflows/review-bot.yml in the repository to review.
+#
+# Setup, in that repository's Settings → Environments → New environment
+# "review-bot":
+#   Secrets:    LLM_BASE_URL   e.g. http://ollama-1:11434,http://ollama-2:11434
+#                              (tried in order), or instead
+#               LLM_PROVIDERS  JSON list of providers (see the README)
+#               ANTHROPIC_API_KEY / OPENAI_API_KEY / ...  only for hosted
+#                              providers listed in LLM_PROVIDERS
+#   Variables:  LLM_MODEL      e.g. qwen3-coder:30b (with LLM_BASE_URL)
+#   Deployment branches: leave "No restriction", or choose "Selected
+#   branches and tags" and add refs/pull/*/merge. A pull_request job runs on
+#   that ref, so a rule like "main only" blocks every review.
+#   Don't add required reviewers: every push would wait for approval.
+#
+# Only use a self-hosted runner on private repositories.
+name: review-bot
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: review-bot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Skip PRs from forks (they must never reach a self-hosted runner) and
+    # release-please PRs (changelog and version bumps only).
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.head_ref, 'release-please--')
+    # The runner scale set (or runner label) that has review-bot installed.
+    runs-on: review-bot
+    environment:
+      name: review-bot
+      deployment: false # use the environment's secrets without a deployment per push
+    timeout-minutes: 45
+    steps:
+      - name: Review
+        run: review-bot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_PROVIDERS: ${{ secrets.LLM_PROVIDERS }}
+          # Only needed for hosted providers in LLM_PROVIDERS; unset secrets are empty.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Uncomment to fail the check while high/critical findings are open:
+          # REVIEW_FAIL_ON: high

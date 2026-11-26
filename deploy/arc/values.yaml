@@ -1,0 +1,38 @@
+# Example values for the gha-runner-scale-set Helm chart:
+#
+#   helm install review-bot \
+#     --namespace arc-runners --create-namespace \
+#     -f values.yaml \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+#
+# Workflows then use `runs-on: review-bot` (the release name, or
+# runnerScaleSetName if set).
+githubConfigUrl: https://github.com/OWNER/REPO
+# Secret in the same namespace with github_token (a PAT allowed to register
+# runners on the repo) or github_app_id / github_app_installation_id /
+# github_app_private_key.
+githubConfigSecret: arc-github-credentials
+minRunners: 0
+maxRunners: 2
+# Must match your controller release; this is the default for a release named "arc".
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-rs-controller
+template:
+  metadata:
+    labels:
+      app.kubernetes.io/part-of: review-bot
+  spec:
+    securityContext:
+      fsGroup: 1001
+    containers:
+      - name: runner
+        # Built from runner.Dockerfile
+        image: REGISTRY/actions-runner-review-bot:latest
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits: { memory: 512Mi }
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }

@@ -1,0 +1,23 @@
+name: ci
+on:
+  pull_request:
+    # Release PRs from release-please only touch these.
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
+  push:
+    branches: [develop]
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: make check
