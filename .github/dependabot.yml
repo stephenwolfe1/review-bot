@@ -1,10 +1,9 @@
 # Keeps actions, Go and the Dockerfile's base images current. Updates are
-# grouped so each ecosystem opens one PR a week.
+# grouped so each ecosystem opens one PR a week, against the default branch.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
-    target-branch: develop
     schedule:
       interval: weekly
     commit-message:
@@ -15,7 +14,6 @@ updates:
 
   - package-ecosystem: gomod
     directory: /
-    target-branch: develop
     schedule:
       interval: weekly
     commit-message:
@@ -23,7 +21,6 @@ updates:
 
   - package-ecosystem: docker
     directory: /
-    target-branch: develop
     schedule:
       interval: weekly
     commit-message:

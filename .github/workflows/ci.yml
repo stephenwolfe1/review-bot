@@ -6,7 +6,7 @@ on:
       - CHANGELOG.md
       - .release-please-manifest.json
   push:
-    branches: [develop]
+    branches: [main]
     paths-ignore:
       - CHANGELOG.md
       - .release-please-manifest.json
