@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"review-bot/internal/diff"
 	"review-bot/internal/gh"
 	"review-bot/internal/llm"
 )
@@ -175,6 +176,8 @@ type fakeLLM struct {
 	verifySeverity string   // what the fake verifier says; "" = agree
 	lastVerify     string   // the last verify prompt
 	schemaKeys     []string // kind.property for each schema received
+	order          []string // kind of each call, in order
+	prefixes       []string // system prompt + user message up to "Your task:"
 }
 
 func (l *fakeLLM) handler() http.Handler {
@@ -213,7 +216,7 @@ func (l *fakeLLM) handler() http.Handler {
 			l.lastVerify = user
 			sev := l.verifySeverity
 			l.mu.Unlock()
-			reply = fmt.Sprintf(`{"valid":true,"suggestion_ok":true,"severity":%q,"reason":"real"}`, sev)
+			reply = fmt.Sprintf(`{"analysis":"Div(1, 0) divides by zero and panics, so the problem is real.","valid":true,"suggestion_ok":true,"severity":%q}`, sev)
 		case strings.Contains(sys, "earlier automated review comment"):
 			kind = "resolve"
 			reply = `{"status":"not_fixed","reason":"still divides"}`
@@ -227,6 +230,12 @@ func (l *fakeLLM) handler() http.Handler {
 		}
 		l.mu.Lock()
 		l.calls[kind]++
+		l.order = append(l.order, kind)
+		full := req.Messages[0].Content + "\x00" + req.Messages[len(req.Messages)-1].Content
+		if i := strings.Index(full, "Your task:"); i >= 0 {
+			full = full[:i]
+		}
+		l.prefixes = append(l.prefixes, full)
 		if f, ok := req.Format.(map[string]any); ok {
 			if props, ok := f["properties"].(map[string]any); ok {
 				for k := range props {
@@ -544,5 +553,77 @@ func TestSchemaKeepsPropertyOrder(t *testing.T) {
 	}
 	if !json.Valid(b) {
 		t.Fatal("invalid JSON")
+	}
+}
+
+func TestVerifyReusesTheFilesPromptPrefix(t *testing.T) {
+	_, fl, r := setup(t)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// calc.go: both checks, then its verification right away.
+	if got := strings.Join(fl.order, ","); got != "bugs,security,verify" {
+		t.Fatalf("call order = %s", got)
+	}
+	if fl.prefixes[0] != fl.prefixes[1] || fl.prefixes[0] != fl.prefixes[2] {
+		t.Fatalf("prompts don't share a prefix:\n%q\n%q\n%q", fl.prefixes[0], fl.prefixes[1], fl.prefixes[2])
+	}
+	if !strings.Contains(fl.prefixes[0], "File: calc.go") || !strings.Contains(fl.prefixes[0], "Full file after the change") {
+		t.Fatalf("prefix should hold the file: %q", fl.prefixes[0])
+	}
+}
+
+func TestDocsIgnore(t *testing.T) {
+	skip := []string{"README.md", "docs/setup.md", "deploy/arc/README.md", "site/docs/guide.html", "LICENSE", "sub/LICENSE.txt", "notes.rst", "page.mdx"}
+	keep := []string{"main.go", "CMakeLists.txt", "requirements.txt", "internal/review/prompts.go", "scripts/doc_gen.py", "markdown.go"}
+	for _, p := range skip {
+		if !ignored(p, DocsIgnore) {
+			t.Errorf("%s should be skipped as docs", p)
+		}
+	}
+	for _, p := range keep {
+		if ignored(p, append(append([]string{}, DefaultIgnore...), DocsIgnore...)) {
+			t.Errorf("%s should still be reviewed", p)
+		}
+	}
+}
+
+func TestTestsIgnore(t *testing.T) {
+	skip := []string{"internal/review/review_test.go", "pkg/test_parser.py", "pkg/parser_test.py", "web/src/app.test.ts",
+		"web/src/user.spec.js", "tests/e2e.py", "src/test/java/FooTest.java", "Tests/CellNotesTests/ChecklistTests.swift",
+		"web/__tests__/a.js", "internal/diff/testdata/sample.patch"}
+	keep := []string{"internal/review/review.go", "testing.go", "contest.go", "pkg/attest.py", "latest.go",
+		"cmd/testserver/main.go", "src/main/java/Foo.java"}
+	for _, p := range skip {
+		if !ignored(p, TestsIgnore) {
+			t.Errorf("%s should be skipped as a test", p)
+		}
+	}
+	for _, p := range keep {
+		if ignored(p, TestsIgnore) {
+			t.Errorf("%s should still be reviewed", p)
+		}
+	}
+}
+
+func TestDuplicatesMergeAcrossChecks(t *testing.T) {
+	r := &Reviewer{Cfg: Config{MinSeverity: "low", MinConfidence: 0.5}}
+	p := map[string]*diff.Patch{"a.go": diff.Parse("@@ -0,0 +1,3 @@\n+a\n+b\n+c")}
+	ex := "Total([]int{1}) panics with index 1 out of range"
+	in := []Finding{
+		{Path: "a.go", Line: 2, Category: "bugs", Severity: "high", Title: "Off-by-one error in loop bounds", Body: "x", Example: ex, Confidence: 0.9},
+		{Path: "a.go", Line: 2, Category: "security", Severity: "high", Title: "Array bounds violation", Body: "x", Example: ex, Confidence: 0.9},
+	}
+	out := r.filter(in, p, nil)
+	// An array-bounds bug is a bug, whichever check found it (see topic.go).
+	if len(out) != 1 || out[0].Category != "bugs" {
+		t.Fatalf("want one finding, labelled bugs: %+v", out)
+	}
+}
+
+// Old-style verdicts with "reason" still work.
+func TestVerdictReasonFallback(t *testing.T) {
+	if firstNonEmpty("", "  ", "because") != "because" || firstNonEmpty("analysis", "reason") != "analysis" {
+		t.Error("firstNonEmpty")
 	}
 }

@@ -68,6 +68,11 @@ func main() {
 	if err != nil {
 		logger.Fatalf("LLM_TIMEOUT: %v", err)
 	}
+	prof, err := review.LookupProfile(os.Getenv("REVIEW_PROFILE"))
+	if err != nil {
+		logger.Fatal(err)
+	}
+	llm.DefaultNumCtx = envInt("LLM_NUM_CTX", prof.NumCtx)
 	providers, err := loadProviders()
 	if err != nil {
 		logger.Fatal(err)
@@ -75,18 +80,24 @@ func main() {
 	lc := &llm.Client{Providers: providers, HTTP: llm.NewHTTPClient(timeout), Logf: logger.Printf}
 
 	ignore := append([]string{}, review.DefaultIgnore...)
+	if !envBool("REVIEW_DOCS", false) {
+		ignore = append(ignore, review.DocsIgnore...)
+	}
+	if !envBool("REVIEW_TESTS", false) {
+		ignore = append(ignore, review.TestsIgnore...)
+	}
 	ignore = append(ignore, splitList(os.Getenv("REVIEW_IGNORE"))...)
 	cfg := review.Config{
 		PR:            *prNum,
 		Checks:        splitList(env("REVIEW_CHECKS", "bugs,security")),
-		MinSeverity:   env("REVIEW_MIN_SEVERITY", "low"),
-		MinConfidence: envFloat("REVIEW_MIN_CONFIDENCE", 0.7),
-		Verify:        envBool("REVIEW_VERIFY", true),
+		MinSeverity:   env("REVIEW_MIN_SEVERITY", prof.MinSeverity),
+		MinConfidence: envFloat("REVIEW_MIN_CONFIDENCE", prof.MinConfidence),
+		Verify:        envBool("REVIEW_VERIFY", prof.Verify),
 		Ignore:        ignore,
-		MaxFiles:      envInt("REVIEW_MAX_FILES", 40),
-		MaxPatchLines: envInt("REVIEW_MAX_PATCH_LINES", 800),
-		FullFileLines: envInt("REVIEW_FULL_FILE_LINES", 500),
-		MaxComments:   envInt("REVIEW_MAX_COMMENTS", 15),
+		MaxFiles:      envInt("REVIEW_MAX_FILES", prof.MaxFiles),
+		MaxPatchLines: envInt("REVIEW_MAX_PATCH_LINES", prof.MaxPatchLines),
+		FullFileLines: envInt("REVIEW_FULL_FILE_LINES", prof.FullFileLines),
+		MaxComments:   envInt("REVIEW_MAX_COMMENTS", prof.MaxComments),
 		FailOn:        strings.ToLower(env("REVIEW_FAIL_ON", "")),
 		ReviewDrafts:  envBool("REVIEW_DRAFTS", false),
 		BotLogins:     splitList(env("REVIEW_BOT_LOGIN", strings.Join(review.DefaultBotLogins, ","))),
@@ -119,7 +130,8 @@ func main() {
 	if err := lc.Preflight(ctx); err != nil {
 		logger.Fatal(err)
 	}
-	logger.Printf("%s/%s#%d checks=%v", owner, name, cfg.PR, cfg.Checks)
+	logger.Printf("%s/%s#%d checks=%v profile=%s (full files up to %d lines, max %d comments, min severity %s)",
+		owner, name, cfg.PR, cfg.Checks, env("REVIEW_PROFILE", "standard"), cfg.FullFileLines, cfg.MaxComments, cfg.MinSeverity)
 	r := &review.Reviewer{GH: ghc, LLM: lc, Cfg: cfg}
 	res, err := r.Run(ctx)
 	if err != nil {
@@ -137,7 +149,14 @@ func main() {
 // that is unset, the single-provider LLM_* variables. LLM_BASE_URL may hold
 // several comma-separated URLs, which are tried in order with the same model.
 func loadProviders() ([]llm.Provider, error) {
+	// Thinking is off by default for Ollama: reasoning models otherwise write
+	// thousands of hidden tokens before every answer, and the verify pass
+	// already gives each finding a second look. LLM_THINK=true turns it on.
 	think := envOptBool("LLM_THINK")
+	if think == nil {
+		off := false
+		think = &off
+	}
 	if js := strings.TrimSpace(os.Getenv("LLM_PROVIDERS")); js != "" {
 		ps, err := llm.ParseProviders(js, os.Getenv)
 		if err != nil {

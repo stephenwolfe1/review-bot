@@ -57,6 +57,23 @@ var DefaultIgnore = []string{
 	"**/*.svg", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.pdf", "**/*.pbxproj", "**/*.xcassets/**",
 }
 
+// DocsIgnore skips documentation, which a bug and security reviewer has
+// nothing useful to say about. REVIEW_DOCS=true reviews it anyway. Secrets
+// pasted into docs are better caught by secret scanning.
+var DocsIgnore = []string{
+	"**/*.md", "**/*.mdx", "**/*.markdown", "**/*.rst", "**/*.adoc",
+	"docs/**", "**/docs/**", "LICENSE*", "**/LICENSE*", "COPYING*",
+}
+
+// TestsIgnore skips test code. Models judge test fakes and helpers as if they
+// were production code, and their findings there have mostly been noise.
+// REVIEW_TESTS=true reviews tests anyway.
+var TestsIgnore = []string{
+	"**/*_test.go", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*",
+	"test/**", "**/test/**", "tests/**", "**/tests/**", "Tests/**", "**/Tests/**",
+	"__tests__/**", "**/__tests__/**", "testdata/**", "**/testdata/**",
+}
+
 // Result summarises a run.
 type Result struct {
 	HeadSHA     string
@@ -272,47 +289,23 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 			continue
 		}
 		content, _ := r.content(ctx, name, head)
+		fc := r.fileContext(pr, name, p, content)
+		var raw []Finding
 		for _, check := range cfg.Checks {
-			fs, err := r.reviewFile(ctx, pr, name, p, content, check)
+			fs, err := r.reviewFile(ctx, fc, name, check)
 			if err != nil {
 				r.logf("review %s (%s): %v", name, check, err)
 				continue
 			}
-			findings = append(findings, fs...)
+			raw = append(raw, fs...)
 		}
-	}
-
-	findings = r.filter(findings, patches, bot)
-
-	if cfg.Verify && len(findings) > 0 {
-		var kept []Finding
-		for _, f := range findings {
-			content, _ := r.content(ctx, f.Path, head)
-			v, err := r.verify(ctx, f, patches[f.Path], content)
-			if err != nil {
-				r.logf("verify %s:%d: %v (keeping)", f.Path, f.Line, err)
-				kept = append(kept, f)
-				continue
-			}
-			if !v.Valid {
-				r.logf("dropped %s:%d %q: %s", f.Path, f.Line, f.Title, v.Reason)
-				continue
-			}
-			if !v.SuggestionOK && f.Suggestion != "" {
-				r.logf("dropped the suggestion for %s:%d: %s", f.Path, f.Line, v.Reason)
-				f.Suggestion = ""
-			}
-			// The verifier may lower the severity, never raise it.
-			if v.Severity != "" && SeverityRank(v.Severity) < SeverityRank(f.Severity) {
-				r.logf("%s:%d %q: severity %s -> %s", f.Path, f.Line, f.Title, f.Severity, NormalizeSeverity(v.Severity))
-				f.Severity = NormalizeSeverity(v.Severity)
-			}
-			if SeverityRank(f.Severity) < SeverityRank(cfg.MinSeverity) {
-				continue
-			}
-			kept = append(kept, f)
+		// Filter and verify this file's findings straight away, while the
+		// model server still has this file's prompt cached.
+		kept := r.filter(raw, patches, bot)
+		if cfg.Verify {
+			kept = r.verifyAll(ctx, fc, kept, content)
 		}
-		findings = kept
+		findings = append(findings, kept...)
 	}
 
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -363,27 +356,39 @@ func (r *Reviewer) content(ctx context.Context, p, sha string) (string, error) {
 	return s, err
 }
 
-func (r *Reviewer) reviewFile(ctx context.Context, pr *gh.PR, name string, p *diff.Patch, content, check string) ([]Finding, error) {
-	r.logf("%s [%s]: waiting on the model…", name, check)
-	// The file comes first and the check's instructions last, so every check
-	// of a file sends the same prompt prefix. Ollama reuses its cached reading
-	// of that prefix, and the second check only has to read the instructions.
+// fileContext is the start of every prompt about a file: the PR, the diff
+// and, for files up to REVIEW_FULL_FILE_LINES, the whole file. All calls for
+// a file (each check, then each verification) start with exactly this text
+// after the same system prompt, so a model server that caches prompts
+// (Ollama does) reads the file once and reuses it.
+func (r *Reviewer) fileContext(pr *gh.PR, name string, p *diff.Patch, content string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Pull request title: %s\n", pr.Title)
 	if desc := strings.TrimSpace(pr.Body); desc != "" {
 		fmt.Fprintf(&b, "Pull request description:\n<<<\n%s\n>>>\n", truncate(desc, 2000))
 	}
 	fmt.Fprintf(&b, "\nFile: %s\n\nDiff (left gutter = new-file line number):\n<<<\n%s>>>\n", name, p.Annotated())
-	if content != "" && r.Cfg.FullFileLines > 0 && strings.Count(content, "\n") <= r.Cfg.FullFileLines {
+	if r.fullFile(content) {
 		fmt.Fprintf(&b, "\nFull file after the change, for context:\n<<<\n%s>>>\n", diff.NumberLines(content, 1, 0))
 	}
-	b.WriteString("\nYour task:\n" + prompt(check))
-	b.WriteString("\nReview the added lines. Reply with the JSON object only.")
+	return b.String()
+}
 
-	msgs := []llm.Message{
+func (r *Reviewer) fullFile(content string) bool {
+	return content != "" && r.Cfg.FullFileLines > 0 && strings.Count(content, "\n") <= r.Cfg.FullFileLines
+}
+
+// messages builds a prompt: shared rules, the file's context, then the task.
+func messages(fileContext, task string) []llm.Message {
+	return []llm.Message{
 		{Role: "system", Content: prompt("common")},
-		{Role: "user", Content: b.String()},
+		{Role: "user", Content: fileContext + "\nYour task:\n" + task},
 	}
+}
+
+func (r *Reviewer) reviewFile(ctx context.Context, fileContext, name, check string) ([]Finding, error) {
+	r.logf("%s [%s]: waiting on the model…", name, check)
+	msgs := messages(fileContext, prompt(check)+"\n"+prompt("findings"))
 	var out struct {
 		Findings []Finding `json:"findings"`
 	}
@@ -410,8 +415,11 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		if f.Title == "" || strings.TrimSpace(f.Body) == "" {
 			continue
 		}
-		if strings.TrimSpace(f.Example) == "" {
-			r.logf("dropped %s:%d %q: no concrete failing example", f.Path, f.Line, f.Title)
+		if f.Category == "security" && !securityTopic(f) {
+			r.logf("%s:%d %q: not a security issue, relabelled as a bug", f.Path, f.Line, f.Title)
+			f.Category = "bugs"
+		}
+		if !r.exampleOK(&f) {
 			continue
 		}
 		if SeverityRank(f.Severity) < minSev || f.Confidence < r.Cfg.MinConfidence {
@@ -448,7 +456,10 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		dup := false
 		for i, o := range out {
 			if similar(f.Path, f.Line, f.Title, f.Category, o.Path, o.Line, o.Title, o.Category) {
-				if SeverityRank(f.Severity) > SeverityRank(o.Severity) {
+				// Keep the more severe one; on a tie, prefer the security label
+				// (only real security findings still carry it: see topic.go).
+				if SeverityRank(f.Severity) > SeverityRank(o.Severity) ||
+					(SeverityRank(f.Severity) == SeverityRank(o.Severity) && f.Category == "security" && o.Category != "security") {
 					out[i] = f
 				}
 				dup = true
@@ -460,6 +471,28 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		}
 	}
 	return out
+}
+
+// exampleOK applies the example rules (see concrete.go). It may lower the
+// finding's severity; false means drop it.
+func (r *Reviewer) exampleOK(f *Finding) bool {
+	ex := strings.TrimSpace(f.Example)
+	if ex == "" {
+		r.logf("dropped %s:%d %q: no example", f.Path, f.Line, f.Title)
+		return false
+	}
+	if f.Category == "security" {
+		return true
+	}
+	if !exampleHasValue(ex) {
+		r.logf("dropped %s:%d %q: its example names no specific value (%q)", f.Path, f.Line, f.Title, truncate(oneLine(ex), 120))
+		return false
+	}
+	if exampleHedged(ex) && SeverityRank(f.Severity) > SeverityRank("medium") {
+		r.logf("%s:%d %q: hedged example, severity %s -> medium", f.Path, f.Line, f.Title, f.Severity)
+		f.Severity = "medium"
+	}
+	return true
 }
 
 func dupOfThread(f Finding, bot []botThread) bool {
@@ -484,7 +517,9 @@ func similar(p1 string, l1 int, t1, c1, p2 string, l2 int, t2, c2 string) bool {
 	if d > 8 {
 		return false
 	}
-	if c1 == c2 && d <= 2 {
+	// Within 2 lines is the same problem, whichever check found it: the bugs
+	// and security checks often both flag one line.
+	if d <= 2 {
 		return true
 	}
 	return jaccard(words(t1), words(t2)) >= 0.4
@@ -523,10 +558,11 @@ type verdict struct {
 	Reason       string
 }
 
-func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content string) (verdict, error) {
+func (r *Reviewer) verify(ctx context.Context, fileContext string, f Finding, content string) (verdict, error) {
 	r.logf("%s:%d: verifying %q…", f.Path, f.Line, f.Title)
 	var b strings.Builder
-	fmt.Fprintf(&b, "File: %s\n\nFinding (%s, %s) at line %d", f.Path, f.Category, f.Severity, f.Line)
+	b.WriteString(prompt("verify"))
+	fmt.Fprintf(&b, "\nThe finding (%s, %s) at line %d", f.Category, f.Severity, f.Line)
 	if f.EndLine > f.Line {
 		fmt.Fprintf(&b, "-%d", f.EndLine)
 	}
@@ -545,32 +581,65 @@ func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content
 			fmt.Fprintf(&b, "\nSuggested replacement for lines %d-%d:\n<<<\n%s\n>>>\n", f.Line, end, f.Suggestion)
 		}
 	}
-	if p != nil {
-		fmt.Fprintf(&b, "\nDiff:\n<<<\n%s>>>\n", p.Annotated())
-	}
-	if content != "" {
-		lo, hi := f.Line-60, f.EndLine+60
-		if r.Cfg.FullFileLines > 0 && strings.Count(content, "\n") <= r.Cfg.FullFileLines {
-			lo, hi = 1, 0
+	if content != "" && !r.fullFile(content) {
+		// The file was too big to include in full: show the code around the
+		// finding, and the definitions it names from elsewhere in the file.
+		from, to := f.Line-60, f.EndLine+60
+		if to < f.Line+60 {
+			to = f.Line + 60
 		}
-		fmt.Fprintf(&b, "\nCurrent file:\n<<<\n%s>>>\n", diff.NumberLines(content, lo, hi))
+		fmt.Fprintf(&b, "\nCode around the finding:\n<<<\n%s>>>\n", diff.NumberLines(content, from, to))
+		if defs := definitionsFor(f, content, from, to); defs != "" {
+			fmt.Fprintf(&b, "\nDefinitions the finding refers to, from elsewhere in this file:\n%s", defs)
+		}
 	}
 	var out struct {
+		Analysis     string `json:"analysis"`
 		Valid        bool   `json:"valid"`
 		SuggestionOK *bool  `json:"suggestion_ok"`
 		Severity     string `json:"severity"`
-		Reason       string `json:"reason"`
+		Reason       string `json:"reason"` // older replies
 	}
-	msgs := []llm.Message{{Role: "system", Content: prompt("verify")}, {Role: "user", Content: b.String()}}
-	if err := r.LLM.ChatSchema(ctx, msgs, verifySchema, &out); err != nil {
+	if err := r.LLM.ChatSchema(ctx, messages(fileContext, b.String()), verifySchema, &out); err != nil {
 		return verdict{}, err
 	}
 	return verdict{
 		Valid:        out.Valid,
 		SuggestionOK: out.SuggestionOK == nil || *out.SuggestionOK,
 		Severity:     strings.TrimSpace(out.Severity),
-		Reason:       out.Reason,
+		Reason:       firstNonEmpty(out.Analysis, out.Reason),
 	}, nil
+}
+
+// verifyAll runs the verify pass over one file's findings.
+func (r *Reviewer) verifyAll(ctx context.Context, fileContext string, findings []Finding, content string) []Finding {
+	var kept []Finding
+	for _, f := range findings {
+		v, err := r.verify(ctx, fileContext, f, content)
+		if err != nil {
+			r.logf("verify %s:%d: %v (keeping)", f.Path, f.Line, err)
+			kept = append(kept, f)
+			continue
+		}
+		if !v.Valid {
+			r.logf("dropped %s:%d %q: %s", f.Path, f.Line, f.Title, v.Reason)
+			continue
+		}
+		if !v.SuggestionOK && f.Suggestion != "" {
+			r.logf("dropped the suggestion for %s:%d: %s", f.Path, f.Line, v.Reason)
+			f.Suggestion = ""
+		}
+		// The verifier may lower the severity, never raise it.
+		if v.Severity != "" && SeverityRank(v.Severity) < SeverityRank(f.Severity) {
+			r.logf("%s:%d %q: severity %s -> %s", f.Path, f.Line, f.Title, f.Severity, NormalizeSeverity(v.Severity))
+			f.Severity = NormalizeSeverity(v.Severity)
+		}
+		if SeverityRank(f.Severity) < SeverityRank(r.Cfg.MinSeverity) {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 func (r *Reviewer) checkResolved(ctx context.Context, t botThread, byName, delta map[string]gh.File, head string) (bool, string, error) {
@@ -713,6 +782,15 @@ func (r *Reviewer) isBot(login string) bool {
 
 // DefaultBotLogins is the account GITHUB_TOKEN posts as.
 var DefaultBotLogins = []string{"github-actions[bot]"}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
