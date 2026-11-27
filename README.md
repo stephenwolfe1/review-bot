@@ -278,11 +278,15 @@ on its own still overrides the profile.
 | `REVIEW_MAX_FILES` | 20 | 40 | 100 |
 | `REVIEW_MAX_PATCH_LINES` | 400 | 800 | 2000 |
 | `REVIEW_MAX_COMMENTS` | 8 | 15 | 25 |
-| `REVIEW_MIN_SEVERITY` | medium | low | low |
+| `REVIEW_MIN_SEVERITY` | high | high | low |
 | `REVIEW_MIN_CONFIDENCE` | 0.8 | 0.7 | 0.6 |
 | `REVIEW_VERIFY` | on | on | on |
 
 Every profile runs both checks (bugs and security) and verifies each finding.
+`lite` and `standard` post only High and Critical findings: in testing, real
+problems came out at those levels, while findings the bot was unsure of
+(hedged, or lowered by the verifier) landed at Medium and were mostly noise.
+Use `full`, or set `REVIEW_MIN_SEVERITY=medium`, to see those too.
 
 ### All settings
 

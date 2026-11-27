@@ -12,8 +12,11 @@ func TestProfiles(t *testing.T) {
 	if !(lite.FullFileLines < std.FullFileLines && std.FullFileLines < full.FullFileLines) {
 		t.Error("full-file context should grow lite < standard < full")
 	}
-	if SeverityRank(lite.MinSeverity) <= SeverityRank(std.MinSeverity) || lite.MinConfidence <= std.MinConfidence {
-		t.Error("lite should post only more serious, more confident findings")
+	if SeverityRank(lite.MinSeverity) < SeverityRank(std.MinSeverity) || lite.MinConfidence <= std.MinConfidence {
+		t.Error("lite should be at least as strict as standard, and want more confidence")
+	}
+	if std.MinSeverity != "high" || SeverityRank(full.MinSeverity) >= SeverityRank(std.MinSeverity) {
+		t.Error("standard posts high and critical only; full posts more")
 	}
 	if full.NumCtx <= std.NumCtx {
 		t.Error("full needs a bigger context for 1500-line files")
