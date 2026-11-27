@@ -415,6 +415,10 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		if f.Title == "" || strings.TrimSpace(f.Body) == "" {
 			continue
 		}
+		if f.Category == "security" && !securityTopic(f) {
+			r.logf("%s:%d %q: not a security issue, relabelled as a bug", f.Path, f.Line, f.Title)
+			f.Category = "bugs"
+		}
 		if !r.exampleOK(&f) {
 			continue
 		}
@@ -452,7 +456,8 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		dup := false
 		for i, o := range out {
 			if similar(f.Path, f.Line, f.Title, f.Category, o.Path, o.Line, o.Title, o.Category) {
-				// Keep the more severe one; on a tie, prefer the security label.
+				// Keep the more severe one; on a tie, prefer the security label
+				// (only real security findings still carry it: see topic.go).
 				if SeverityRank(f.Severity) > SeverityRank(o.Severity) ||
 					(SeverityRank(f.Severity) == SeverityRank(o.Severity) && f.Category == "security" && o.Category != "security") {
 					out[i] = f

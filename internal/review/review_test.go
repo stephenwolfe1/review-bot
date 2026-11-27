@@ -615,8 +615,9 @@ func TestDuplicatesMergeAcrossChecks(t *testing.T) {
 		{Path: "a.go", Line: 2, Category: "security", Severity: "high", Title: "Array bounds violation", Body: "x", Example: ex, Confidence: 0.9},
 	}
 	out := r.filter(in, p, nil)
-	if len(out) != 1 || out[0].Category != "security" {
-		t.Fatalf("want one finding, labelled security on a tie: %+v", out)
+	// An array-bounds bug is a bug, whichever check found it (see topic.go).
+	if len(out) != 1 || out[0].Category != "bugs" {
+		t.Fatalf("want one finding, labelled bugs: %+v", out)
 	}
 }
 

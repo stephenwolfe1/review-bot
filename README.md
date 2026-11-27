@@ -69,11 +69,13 @@ Each run, triggered by a push to a pull request:
    example must name a specific value (a number, a quoted string, nil,
    empty, …) or the finding is dropped. One worded as "may" or "could" is
    capped at Medium. Security examples are naturally worded that way ("an
-   attacker could…"), so they only need to be present. These checks are done
-   in code, not left to the model. Findings within 2 lines of each other are
-   merged, even when the bugs and security checks both flagged the line. So are low-confidence findings, lines outside the
-   diff, and duplicates, including anything already raised (resolved threads
-   count).
+   attacker could…"), so they only need to be present. The security check
+   also reports plain bugs; one that names no security problem (injection,
+   traversal, credentials, TLS, auth, …) is relabelled as a bug and held to
+   the bug rules. These checks are done in code, not left to the model.
+   Low-confidence findings, lines outside the diff and anything already
+   raised (resolved threads count) are dropped. Findings within 2 lines of
+   each other are merged, even when both checks flagged the line.
 5. **Verify.** A second model call per finding writes its analysis of the
    example first, then decides whether the problem is real. A wrong
    suggestion only removes the suggestion, never the finding. For files too big to send whole, it also gets the
