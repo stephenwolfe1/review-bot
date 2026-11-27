@@ -35,6 +35,7 @@ A comment looks like this:
 > 	}
 > 	return x / y, nil
 > ```
+> <sub>⚠️ Written by an AI model. Read the change before applying it.</sub>
 >
 > <sub>review-bot · qwen3-coder:30b</sub>
 
@@ -209,7 +210,8 @@ Everything is set through environment variables.
 | `REVIEW_MAX_PATCH_LINES` | `800` | larger file diffs are skipped and listed in the summary |
 | `REVIEW_FULL_FILE_LINES` | `500` | send the whole file as context up to this size |
 | `REVIEW_IGNORE` | | extra comma-separated globs, e.g. `docs/**,CHANGELOG.md`. Lockfiles, images, `vendor/` and `.pbxproj` are always skipped. |
-| `REVIEW_FAIL_ON` | | e.g. `high`: fail the check while open findings at or above it exist |
+| `REVIEW_FAIL_ON` | | e.g. `high`: fail the check while open findings at or above it exist. A quality gate, not a security control; see [Security](#security). |
+| `REVIEW_BOT_LOGIN` | `github-actions[bot]` | the account the bot posts as; only its comments are trusted. Set it if you run the bot with another token, e.g. `my-app[bot]`. |
 | `REVIEW_DRAFTS` | `false` | review draft PRs |
 | `REVIEW_FORCE` / `-force` | `false` | review even if the head commit was already reviewed |
 | `DRY_RUN` / `-dry-run` | `false` | log instead of posting |
@@ -228,12 +230,30 @@ a public issue.
 - **Least privilege.** The workflow needs only `contents: read` and
   `pull-requests: write`. The bot never checks out or runs the PR's code. It
   reads diffs and files through the API.
-- **Untrusted input.** PR content is treated as data, and the prompts tell the
-  model to ignore instructions inside it. The model's output is only ever
-  posted as comments, never executed.
+- **The model's output is untrusted.** A PR can try to steer the model with
+  instructions hidden in code or comments (prompt injection). The prompts tell
+  the model to ignore them, and the bot limits what a steered model can do:
+  - its output is only ever posted as comments, never executed
+  - mentions, links, images and raw HTML in its text are made inert before
+    posting
+  - suggested changes are marked as AI-written and dropped when much larger
+    than the lines they replace
+- **Forged markers are ignored.** The bot keeps its state in hidden markers,
+  and trusts them only in comments by its own account (`REVIEW_BOT_LOGIN`).
+  Anyone else's copy of a marker has no effect.
 - **Secrets.** Keep model URLs and API keys in environment secrets
   (see [the example workflow](examples/review-bot.yml)). Keys are never
   logged.
+- **Know what it can't stop.** Prompt injection can still make the bot
+  report nothing, or resolve a thread that wasn't really fixed. Treat it as an
+  extra reviewer, not as a security gate. `REVIEW_FAIL_ON` can be switched off
+  the same way, so don't rely on it to keep vulnerable code out.
+- **Anyone who can push a branch is trusted with the runner.** On
+  `pull_request`, GitHub runs the workflow file from the PR itself, so a PR
+  can change it to run any command on your runner, with the `review-bot`
+  environment's secrets. Fork PRs are skipped. Branches in the repository
+  aren't, so only give push access to people you'd trust with the runner and
+  those secrets.
 - **Network.** [deploy/arc/networkpolicy.yaml](deploy/arc/networkpolicy.yaml)
   limits runner pods to DNS, the model server and public HTTPS.
 
