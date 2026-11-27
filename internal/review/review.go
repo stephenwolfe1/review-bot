@@ -77,6 +77,7 @@ type Finding struct {
 	Severity   string  `json:"severity"`
 	Title      string  `json:"title"`
 	Body       string  `json:"body"`
+	Example    string  `json:"example"` // a concrete failing case
 	Suggestion string  `json:"suggestion"`
 	Confidence float64 `json:"confidence"`
 	Model      string  `json:"-"`
@@ -287,18 +288,27 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 		var kept []Finding
 		for _, f := range findings {
 			content, _ := r.content(ctx, f.Path, head)
-			ok, sugOK, reason, err := r.verify(ctx, f, patches[f.Path], content)
+			v, err := r.verify(ctx, f, patches[f.Path], content)
 			if err != nil {
 				r.logf("verify %s:%d: %v (keeping)", f.Path, f.Line, err)
 				kept = append(kept, f)
 				continue
 			}
-			if !ok {
-				r.logf("dropped %s:%d %q: %s", f.Path, f.Line, f.Title, reason)
+			if !v.Valid {
+				r.logf("dropped %s:%d %q: %s", f.Path, f.Line, f.Title, v.Reason)
 				continue
 			}
-			if !sugOK {
+			if !v.SuggestionOK && f.Suggestion != "" {
+				r.logf("dropped the suggestion for %s:%d: %s", f.Path, f.Line, v.Reason)
 				f.Suggestion = ""
+			}
+			// The verifier may lower the severity, never raise it.
+			if v.Severity != "" && SeverityRank(v.Severity) < SeverityRank(f.Severity) {
+				r.logf("%s:%d %q: severity %s -> %s", f.Path, f.Line, f.Title, f.Severity, NormalizeSeverity(v.Severity))
+				f.Severity = NormalizeSeverity(v.Severity)
+			}
+			if SeverityRank(f.Severity) < SeverityRank(cfg.MinSeverity) {
+				continue
 			}
 			kept = append(kept, f)
 		}
@@ -377,7 +387,7 @@ func (r *Reviewer) reviewFile(ctx context.Context, pr *gh.PR, name string, p *di
 	var out struct {
 		Findings []Finding `json:"findings"`
 	}
-	if err := r.LLM.ChatJSON(ctx, msgs, &out); err != nil {
+	if err := r.LLM.ChatSchema(ctx, msgs, findingsSchema, &out); err != nil {
 		return nil, err
 	}
 	model := r.lastModel()
@@ -398,6 +408,10 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		f.Severity = NormalizeSeverity(f.Severity)
 		f.Title = strings.TrimSpace(f.Title)
 		if f.Title == "" || strings.TrimSpace(f.Body) == "" {
+			continue
+		}
+		if strings.TrimSpace(f.Example) == "" {
+			r.logf("dropped %s:%d %q: no concrete failing example", f.Path, f.Line, f.Title)
 			continue
 		}
 		if SeverityRank(f.Severity) < minSev || f.Confidence < r.Cfg.MinConfidence {
@@ -501,16 +515,35 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(inter) / float64(len(a)+len(b)-inter)
 }
 
-func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content string) (valid, sugOK bool, reason string, err error) {
+// verdict is the verify pass's opinion of a finding.
+type verdict struct {
+	Valid        bool
+	SuggestionOK bool
+	Severity     string
+	Reason       string
+}
+
+func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content string) (verdict, error) {
 	r.logf("%s:%d: verifying %q…", f.Path, f.Line, f.Title)
 	var b strings.Builder
 	fmt.Fprintf(&b, "File: %s\n\nFinding (%s, %s) at line %d", f.Path, f.Category, f.Severity, f.Line)
 	if f.EndLine > f.Line {
 		fmt.Fprintf(&b, "-%d", f.EndLine)
 	}
-	fmt.Fprintf(&b, ":\nTitle: %s\nDetails: %s\n", f.Title, f.Body)
+	fmt.Fprintf(&b, ":\nTitle: %s\nDetails: %s\nExample: %s\n", f.Title, f.Body, f.Example)
 	if f.Suggestion != "" {
-		fmt.Fprintf(&b, "Suggested replacement for those lines:\n<<<\n%s\n>>>\n", f.Suggestion)
+		// Show exactly what would change: a suggestion anchored to the wrong
+		// lines, or one that drops needed code, is easy to spot this way.
+		end := f.EndLine
+		if end < f.Line {
+			end = f.Line
+		}
+		if content != "" {
+			fmt.Fprintf(&b, "\nThe suggested change replaces lines %d-%d, which are currently:\n<<<\n%s>>>\nwith:\n<<<\n%s\n>>>\n",
+				f.Line, end, diff.NumberLines(content, f.Line, end), strings.TrimRight(f.Suggestion, "\n"))
+		} else {
+			fmt.Fprintf(&b, "\nSuggested replacement for lines %d-%d:\n<<<\n%s\n>>>\n", f.Line, end, f.Suggestion)
+		}
 	}
 	if p != nil {
 		fmt.Fprintf(&b, "\nDiff:\n<<<\n%s>>>\n", p.Annotated())
@@ -525,14 +558,19 @@ func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content
 	var out struct {
 		Valid        bool   `json:"valid"`
 		SuggestionOK *bool  `json:"suggestion_ok"`
+		Severity     string `json:"severity"`
 		Reason       string `json:"reason"`
 	}
 	msgs := []llm.Message{{Role: "system", Content: prompt("verify")}, {Role: "user", Content: b.String()}}
-	if err := r.LLM.ChatJSON(ctx, msgs, &out); err != nil {
-		return false, false, "", err
+	if err := r.LLM.ChatSchema(ctx, msgs, verifySchema, &out); err != nil {
+		return verdict{}, err
 	}
-	sugOK = out.SuggestionOK == nil || *out.SuggestionOK
-	return out.Valid, sugOK, out.Reason, nil
+	return verdict{
+		Valid:        out.Valid,
+		SuggestionOK: out.SuggestionOK == nil || *out.SuggestionOK,
+		Severity:     strings.TrimSpace(out.Severity),
+		Reason:       out.Reason,
+	}, nil
 }
 
 func (r *Reviewer) checkResolved(ctx context.Context, t botThread, byName, delta map[string]gh.File, head string) (bool, string, error) {
@@ -577,7 +615,7 @@ func (r *Reviewer) checkResolved(ctx context.Context, t botThread, byName, delta
 		Reason string `json:"reason"`
 	}
 	msgs := []llm.Message{{Role: "system", Content: prompt("resolve")}, {Role: "user", Content: b.String()}}
-	if err := r.LLM.ChatJSON(ctx, msgs, &out); err != nil {
+	if err := r.LLM.ChatSchema(ctx, msgs, resolveSchema, &out); err != nil {
 		return false, "", err
 	}
 	return strings.EqualFold(out.Status, "fixed"), strings.TrimSpace(out.Reason), nil
@@ -627,6 +665,9 @@ func toComment(f Finding, head, model string) gh.ReviewComment {
 	// suggestion sits in a code block, where Markdown isn't rendered.
 	fmt.Fprintf(&b, "%s **%s · %s** — %s\n\n%s\n", sevIcon[f.Severity], title(f.Severity), title(f.Category),
 		sanitizeText(oneLine(f.Title)), sanitizeText(strings.TrimSpace(f.Body)))
+	if ex := strings.TrimSpace(f.Example); ex != "" {
+		fmt.Fprintf(&b, "\n**Example:** %s\n", sanitizeText(oneLine(ex)))
+	}
 	if s := strings.TrimRight(f.Suggestion, "\n"); s != "" && !strings.Contains(s, "```") {
 		fmt.Fprintf(&b, "\n```suggestion\n%s\n```\n", s)
 		b.WriteString("<sub>⚠️ Written by an AI model. Read the change before applying it.</sub>\n")

@@ -11,8 +11,8 @@ you control (Ollama or any OpenAI-compatible server), so your code goes only
 to GitHub and your own servers. Hosted providers such as Anthropic and OpenAI
 are supported as a fallback.
 
-- 🐛 **Bugs and 🔒 security**: one focused prompt each, plus a skeptical second
-  pass that drops false positives.
+- 🐛 **Bugs and 🔒 security**: one focused prompt each. Every finding needs a
+  concrete failing example, and a skeptical second pass checks it.
 - 💬 **Inline comments with fixes**: severity-labelled comments and, when the
   fix is small and certain, a one-click GitHub suggested change.
 - ✅ **Resolves its own comments**: when a later commit fixes the problem, it
@@ -28,6 +28,8 @@ A comment looks like this:
 > 🔴 **High · Bugs** — Division by zero when y is 0
 >
 > `Div` panics when `y` is 0, which `ParseRatio` passes through from user input.
+>
+> **Example:** `ParseRatio("3/0")` panics; it should return `ErrZeroDivisor`.
 >
 > ```suggestion
 > 	if y == 0 {
@@ -63,10 +65,14 @@ Each run, triggered by a push to a pull request:
    "✅ Addressed in `abc1234`" and resolve the thread.
 3. **Review.** For each changed file, send the line-numbered diff plus the whole
    file as context, once per check (bugs, security).
-4. **Filter.** Drop low-confidence findings, lines outside the diff, and
-   duplicates, including anything already raised (resolved threads count).
-5. **Verify.** A second model call per finding rejects false positives and bad
-   suggestions.
+4. **Filter.** Every finding must come with a concrete failing example, and
+   ones without are dropped. So are low-confidence findings, lines outside the
+   diff, and duplicates, including anything already raised (resolved threads
+   count).
+5. **Verify.** A second model call per finding traces its example through the
+   code and rejects false positives. It sees exactly which lines a suggested
+   change would replace, and drops suggestions that are wrong or would remove
+   needed code. It can lower a finding's severity, never raise it.
 6. **Post.** One review with inline comments, and an updated summary comment
    with counts of open issues by severity.
 
@@ -175,6 +181,7 @@ Failover works like this:
 | `name` | label for logs (default `api@host`) |
 | `api_key_env` | read the key from this variable instead of the default |
 | `num_ctx` | Ollama context window (default 16384) |
+| `num_batch` | Ollama: prompt tokens processed at once (Ollama's default 512). Higher can read prompts faster. |
 | `temperature` | default 0.1 for Ollama. Other APIs use the provider's default, since some newer hosted models reject custom values. |
 | `think` | Ollama only: `false` turns a thinking model's reasoning off, `true` turns it on |
 | `max_tokens` | output limit per reply. Ollama: 2048 with `think: false`, otherwise 8192. Anthropic: 8192. |
@@ -212,6 +219,14 @@ If it's slow:
   mostly limited by memory bandwidth, so a smaller model file is faster.
 - **Make fewer calls while testing:** `REVIEW_CHECKS=bugs` and
   `REVIEW_VERIFY=false`.
+- **Replies are constrained to a schema.** With Ollama, the bot sends the JSON
+  schema of the reply it expects, so the model can only write a reply of that
+  shape and stops when it's complete. Older Ollama versions that don't accept
+  schemas fall back to plain JSON mode automatically.
+- **Try a larger `LLM_NUM_BATCH`** (1024 or 2048) if reading prompts is the
+  slow part (low "prompt tok/s" on each file's first check). It uses a little
+  more memory. Ollama reloads the model when this changes, so use one value
+  for everything that shares the server.
 - **Runaway replies are capped.** Some models keep writing after their answer,
   and Ollama has no limit by default, so one call could run until the
   timeout. The bot caps each reply (`LLM_MAX_TOKENS`). When a reply hits the
@@ -241,6 +256,7 @@ Everything is set through environment variables.
 | `LLM_NUM_CTX` | `16384` | Ollama context window. Ollama's own default is too small for whole-file context. |
 | `LLM_TEMPERATURE` | | |
 | `LLM_THINK` | the model's default | `false` turns off "thinking" for Ollama models that do it (Qwen3, DeepSeek-R1, …). Much faster. Also applies to Ollama entries in `LLM_PROVIDERS` without their own `think`. |
+| `LLM_NUM_BATCH` | Ollama's default (512) | see `num_batch`; also applies to `LLM_PROVIDERS` entries without their own |
 | `LLM_MAX_TOKENS` | see `max_tokens` | output limit per reply, for the single provider and for `LLM_PROVIDERS` entries without their own |
 | `LLM_TIMEOUT` | `10m` | per model call. Connecting to a server times out after 5s. |
 | `REVIEW_CHECKS` | `bugs,security` | |
