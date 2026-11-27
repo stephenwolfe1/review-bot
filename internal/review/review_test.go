@@ -586,3 +586,21 @@ func TestDocsIgnore(t *testing.T) {
 		}
 	}
 }
+
+func TestTestsIgnore(t *testing.T) {
+	skip := []string{"internal/review/review_test.go", "pkg/test_parser.py", "pkg/parser_test.py", "web/src/app.test.ts",
+		"web/src/user.spec.js", "tests/e2e.py", "src/test/java/FooTest.java", "Tests/CellNotesTests/ChecklistTests.swift",
+		"web/__tests__/a.js", "internal/diff/testdata/sample.patch"}
+	keep := []string{"internal/review/review.go", "testing.go", "contest.go", "pkg/attest.py", "latest.go",
+		"cmd/testserver/main.go", "src/main/java/Foo.java"}
+	for _, p := range skip {
+		if !ignored(p, TestsIgnore) {
+			t.Errorf("%s should be skipped as a test", p)
+		}
+	}
+	for _, p := range keep {
+		if ignored(p, TestsIgnore) {
+			t.Errorf("%s should still be reviewed", p)
+		}
+	}
+}

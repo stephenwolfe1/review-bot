@@ -66,8 +66,9 @@ Each run, triggered by a push to a pull request:
 3. **Review.** For each changed file, send the line-numbered diff plus the whole
    file as context, once per check (bugs, security).
 4. **Filter.** Every finding must come with a concrete failing example that
-   names a specific value (a number, a quoted string, nil, empty, …), and ones
-   without are dropped. This check is done in code, not left to the model. So are low-confidence findings, lines outside the
+   names a specific value (a number, a quoted string, nil, empty, …) and is
+   definite, with no "could", "may" or "might". Findings without one are
+   dropped. This check is done in code, not left to the model. So are low-confidence findings, lines outside the
    diff, and duplicates, including anything already raised (resolved threads
    count).
 5. **Verify.** A second model call per finding traces its example through the
@@ -306,6 +307,7 @@ Every profile runs both checks (bugs and security) and verifies each finding.
 | `REVIEW_MAX_PATCH_LINES` | from the profile | larger file diffs are skipped and listed in the summary |
 | `REVIEW_FULL_FILE_LINES` | from the profile | send the whole file as context up to this size |
 | `REVIEW_IGNORE` | | extra comma-separated globs, e.g. `generated/**,**/*_test.go`. Lockfiles, images, `vendor/` and `.pbxproj` are always skipped. |
+| `REVIEW_TESTS` | `false` | `true` also reviews test code (`*_test.go`, `*.test.*`, `*.spec.*`, `test_*.py`, `tests/`, `__tests__/`, `testdata/`), which is skipped by default |
 | `REVIEW_DOCS` | `false` | `true` also reviews documentation (`*.md`, `*.rst`, `docs/`, `LICENSE`), which is skipped by default |
 | `REVIEW_FAIL_ON` | | e.g. `high`: fail the check while open findings at or above it exist. A quality gate, not a security control; see [Security](#security). |
 | `REVIEW_BOT_LOGIN` | `github-actions[bot]` | the account the bot posts as; only its comments are trusted. Set it if you run the bot with another token, e.g. `my-app[bot]`. |
@@ -361,6 +363,9 @@ a public issue.
   replacement for human review.
 - Context is the changed file. Bugs that depend on code elsewhere in the
   repository are mostly out of reach.
+- Test code and documentation are skipped by default (`REVIEW_TESTS`,
+  `REVIEW_DOCS`). Models tend to judge test fakes as if they were production
+  code.
 - Resolving threads uses `GITHUB_TOKEN` with `pull-requests: write`. If GitHub
   ever refuses that mutation for the Actions token, use a GitHub App token
   instead.

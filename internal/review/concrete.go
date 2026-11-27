@@ -22,12 +22,20 @@ var (
 	// A plain name in backticks (`verifyAll`, `r.verify()`) isn't a value.
 	plainNameRE = regexp.MustCompile(`^[A-Za-z_][\w.]*(\(\))?$`)
 	edgeWordRE  = regexp.MustCompile(`(?i)\b(nil|null|none|undefined|nan|empty|zero|negative|true|false)\b`)
+	// A real failing case is definite ("Div(1, 0) panics"). Hedged ones
+	// describe something that might happen, which is how vague findings
+	// slip a quoted value past the check above.
+	hedgeRE = regexp.MustCompile(`(?i)\b(could|may|might|potentially|possibly|perhaps|in a way that)\b`)
 )
 
-// concreteExample reports whether an example names at least one specific
-// value: a number, a quoted string, code in backticks that isn't just a
-// name, or an edge value such as nil, empty, zero or negative.
+// concreteExample reports whether an example is definite (no "could",
+// "may", "might", …) and names at least one specific value: a number, a
+// quoted string, code in backticks that isn't just a name, or an edge value
+// such as nil, empty, zero or negative.
 func concreteExample(ex string) bool {
+	if hedgeRE.MatchString(ex) {
+		return false
+	}
 	ex = lineRefRE.ReplaceAllString(ex, "")
 	if numberRE.MatchString(ex) || quotedRE.MatchString(ex) || edgeWordRE.MatchString(ex) {
 		return true

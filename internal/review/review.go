@@ -65,6 +65,15 @@ var DocsIgnore = []string{
 	"docs/**", "**/docs/**", "LICENSE*", "**/LICENSE*", "COPYING*",
 }
 
+// TestsIgnore skips test code. Models judge test fakes and helpers as if they
+// were production code, and their findings there have mostly been noise.
+// REVIEW_TESTS=true reviews tests anyway.
+var TestsIgnore = []string{
+	"**/*_test.go", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*",
+	"test/**", "**/test/**", "tests/**", "**/tests/**", "Tests/**", "**/Tests/**",
+	"__tests__/**", "**/__tests__/**", "testdata/**", "**/testdata/**",
+}
+
 // Result summarises a run.
 type Result struct {
 	HeadSHA     string

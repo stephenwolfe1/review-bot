@@ -17,6 +17,9 @@ func TestConcreteExample(t *testing.T) {
 		// The two false positives from PR 7, as the model wrote them.
 		"When verifyAll is called with a fileContext containing full file content, each individual verification call will receive this context but the verify function's logic assumes it's already part of the user message. This can cause the LLM to misinterpret what code it's reviewing.",
 		"When a file has more than REVIEW_FULL_FILE_LINES lines and is not included in full, the verifyAll function calls verify with fileContext but the verify function tries to show code around the finding without including the actual file content.",
+		// The third: a quoted value, but a hypothetical failure.
+		"When processing a file with multiple checks followed by verification, if the user message contains 'Your task:' in a way that doesn't align with the expected structure, the prefix extraction will incorrectly include or exclude parts of the prompt. This could cause the verification to not properly reuse the cached file prompt as intended.",
+		"a timeout of -1 might be treated as no timeout",
 		"`verifyAll` calls `r.verify()` with the wrong context",
 		"see line 289: this could lead to problems",
 		"",

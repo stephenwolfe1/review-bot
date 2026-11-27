@@ -83,6 +83,9 @@ func main() {
 	if !envBool("REVIEW_DOCS", false) {
 		ignore = append(ignore, review.DocsIgnore...)
 	}
+	if !envBool("REVIEW_TESTS", false) {
+		ignore = append(ignore, review.TestsIgnore...)
+	}
 	ignore = append(ignore, splitList(os.Getenv("REVIEW_IGNORE"))...)
 	cfg := review.Config{
 		PR:            *prNum,
