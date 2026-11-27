@@ -43,9 +43,11 @@ type Provider struct {
 	APIKey      string   `json:"api_key,omitempty"`     // prefer api_key_env
 	APIKeyEnv   string   `json:"api_key_env,omitempty"` // env var holding the key
 	NumCtx      int      `json:"num_ctx,omitempty"`     // ollama only
+	NumBatch    int      `json:"num_batch,omitempty"`   // ollama only: prompt tokens processed at once (Ollama's default 512)
 	Temperature *float64 `json:"temperature,omitempty"` // default 0.1 for ollama, provider default otherwise
-	MaxTokens   int      `json:"max_tokens,omitempty"`  // anthropic: default 8192
+	MaxTokens   int      `json:"max_tokens,omitempty"`  // output limit; see outputLimit
 	JSONMode    *bool    `json:"json_mode,omitempty"`   // openai: send response_format (default true)
+	Think       *bool    `json:"think,omitempty"`       // ollama: turn a model's thinking on or off (default: the model's own)
 }
 
 type preset struct{ api, baseURL, keyEnv string }
@@ -156,11 +158,12 @@ type Client struct {
 	HTTP      *http.Client
 	Logf      func(format string, args ...any)
 
-	mu     sync.Mutex
-	active int
-	down   map[int]string // index -> reason
-	noJSON map[int]bool   // openai providers that rejected response_format
-	used   []string
+	mu       sync.Mutex
+	active   int
+	down     map[int]string // index -> reason
+	noJSON   map[int]bool   // openai providers that rejected response_format
+	noSchema map[int]bool   // ollama providers that rejected a JSON schema in format
+	used     []string
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -274,6 +277,12 @@ func (c *Client) probeOllama(ctx context.Context, p Provider) string {
 
 // Chat sends messages to the first working provider.
 func (c *Client) Chat(ctx context.Context, msgs []Message) (string, error) {
+	return c.chat(ctx, msgs, nil)
+}
+
+// chat sends msgs. schema, if not nil, is a JSON schema the reply must match;
+// Ollama enforces it while generating.
+func (c *Client) chat(ctx context.Context, msgs []Message, schema any) (string, error) {
 	if len(c.Providers) == 0 {
 		return "", errors.New("llm: no providers configured")
 	}
@@ -289,7 +298,7 @@ func (c *Client) Chat(ctx context.Context, msgs []Message) (string, error) {
 			continue
 		}
 		p := c.Providers[i]
-		out, err := c.withRetries(ctx, i, p, msgs)
+		out, err := c.withRetries(ctx, i, p, msgs, schema)
 		if err == nil {
 			c.mu.Lock()
 			if i != c.active {
@@ -330,7 +339,7 @@ func (e *requestError) Error() string { return e.msg }
 // errRetryNow marks an error that should be retried without a backoff.
 var errRetryNow = errors.New("retrying with adjusted request")
 
-func (c *Client) withRetries(ctx context.Context, i int, p Provider, msgs []Message) (string, error) {
+func (c *Client) withRetries(ctx context.Context, i int, p Provider, msgs []Message, schema any) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 && !errors.Is(lastErr, errRetryNow) {
@@ -340,7 +349,7 @@ func (c *Client) withRetries(ctx context.Context, i int, p Provider, msgs []Mess
 			case <-time.After(time.Duration(attempt*3) * time.Second):
 			}
 		}
-		out, retry, err := c.once(ctx, i, p, msgs)
+		out, retry, err := c.once(ctx, i, p, msgs, schema)
 		if err == nil {
 			return out, nil
 		}
@@ -352,11 +361,12 @@ func (c *Client) withRetries(ctx context.Context, i int, p Provider, msgs []Mess
 	return "", lastErr
 }
 
-func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (string, bool, error) {
+func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message, schema any) (string, bool, error) {
 	var url string
 	var body map[string]any
 	headers := map[string]string{"Content-Type": "application/json"}
 	jsonMode := false
+	schemaSent := false
 	switch p.API {
 	case "anthropic":
 		url = p.BaseURL + "/v1/messages"
@@ -406,7 +416,30 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 		if p.Temperature != nil {
 			opts["temperature"] = *p.Temperature
 		}
-		body = map[string]any{"model": p.Model, "messages": msgs, "stream": false, "format": "json", "options": opts}
+		// Without a limit, a model that keeps writing after its answer runs
+		// until the bot's timeout: Ollama shifts the context and carries on.
+		opts["num_predict"] = outputLimit(p)
+		if p.NumBatch > 0 {
+			opts["num_batch"] = p.NumBatch
+		}
+		// With a schema, Ollama only lets the model write JSON of that shape,
+		// and generation ends when the object is complete.
+		var format any = "json"
+		c.mu.Lock()
+		if schema != nil && !c.noSchema[i] {
+			format = schema
+			schemaSent = true
+		}
+		c.mu.Unlock()
+		body = map[string]any{"model": p.Model, "messages": msgs, "stream": false, "format": format, "options": opts}
+		if p.Think != nil {
+			body["think"] = *p.Think
+		}
+		if p.NumCtx > 0 {
+			if est := estimateTokens(msgs); est > p.NumCtx {
+				c.logf("warning: prompt is ~%d tokens but %s's context is %d; Ollama will drop the start of it (raise LLM_NUM_CTX or lower REVIEW_FULL_FILE_LINES)", est, p.Name, p.NumCtx)
+			}
+		}
 		if p.APIKey != "" {
 			headers["Authorization"] = "Bearer " + p.APIKey
 		}
@@ -420,6 +453,7 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	started := time.Now()
 	resp, err := c.http().Do(req)
 	if err != nil {
 		return "", ctx.Err() == nil && !isConnRefused(err), fmt.Errorf("request: %w", err)
@@ -441,6 +475,16 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 			c.mu.Unlock()
 			c.logf("provider %s does not support response_format; retrying without it", p.Name)
 			return "", true, fmt.Errorf("%w: %s", errRetryNow, msg)
+		case resp.StatusCode == 400 && schemaSent && (strings.Contains(strings.ToLower(string(data)), "format") || strings.Contains(strings.ToLower(string(data)), "schema")):
+			// An older Ollama that only understands "format": "json".
+			c.mu.Lock()
+			if c.noSchema == nil {
+				c.noSchema = map[int]bool{}
+			}
+			c.noSchema[i] = true
+			c.mu.Unlock()
+			c.logf("provider %s does not support JSON schemas in format; retrying with plain JSON mode", p.Name)
+			return "", true, fmt.Errorf("%w: %s", errRetryNow, msg)
 		case resp.StatusCode == 429 || resp.StatusCode >= 500:
 			return "", true, errors.New(msg)
 		case resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404:
@@ -450,6 +494,9 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 		}
 	}
 
+	elapsed := time.Since(started)
+	var text string
+	var st stats
 	switch p.API {
 	case "anthropic":
 		var r struct {
@@ -457,6 +504,10 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
@@ -467,26 +518,109 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 				b.WriteString(part.Text)
 			}
 		}
-		return b.String(), false, nil
+		text = b.String()
+		st = stats{promptTokens: r.Usage.InputTokens, outputTokens: r.Usage.OutputTokens}
 	case "openai":
 		var r struct {
 			Choices []struct {
 				Message Message `json:"message"`
 			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil || len(r.Choices) == 0 {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
 		}
-		return r.Choices[0].Message.Content, false, nil
+		text = r.Choices[0].Message.Content
+		st = stats{promptTokens: r.Usage.PromptTokens, outputTokens: r.Usage.CompletionTokens}
 	default:
 		var r struct {
-			Message Message `json:"message"`
+			Message struct {
+				Content  string `json:"content"`
+				Thinking string `json:"thinking"`
+			} `json:"message"`
+			PromptEvalCount    int    `json:"prompt_eval_count"`
+			PromptEvalDuration int64  `json:"prompt_eval_duration"`
+			EvalCount          int    `json:"eval_count"`
+			EvalDuration       int64  `json:"eval_duration"`
+			LoadDuration       int64  `json:"load_duration"`
+			DoneReason         string `json:"done_reason"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
 		}
-		return r.Message.Content, false, nil
+		text = r.Message.Content
+		st = stats{
+			promptTokens: r.PromptEvalCount, promptDur: time.Duration(r.PromptEvalDuration),
+			outputTokens: r.EvalCount, outputDur: time.Duration(r.EvalDuration),
+			loadDur: time.Duration(r.LoadDuration), thinkingChars: len(r.Message.Thinking),
+		}
+		if p.NumCtx > 0 && r.PromptEvalCount >= p.NumCtx-16 {
+			c.logf("warning: the prompt filled %s's whole %d-token context, so Ollama dropped part of it (raise LLM_NUM_CTX or lower REVIEW_FULL_FILE_LINES)", p.Name, p.NumCtx)
+		}
+		if r.DoneReason == "length" {
+			c.logf("  %s (%s): %s in %.1fs", p.Name, p.Model, st, elapsed.Seconds())
+			// Usually a model that kept going after its JSON. Keep the reply if
+			// the JSON in it is complete; otherwise give up on this call.
+			if json.Valid([]byte(ExtractJSON(text))) {
+				c.logf("warning: %s hit the %d-token output limit; using the complete JSON at the start of its reply", p.Name, outputLimit(p))
+				return text, false, nil
+			}
+			return "", false, &requestError{fmt.Sprintf("reply hit the %d-token output limit before finishing (raise LLM_MAX_TOKENS if the model needs more)", outputLimit(p))}
+		}
 	}
+	c.logf("  %s (%s): %s in %.1fs", p.Name, p.Model, st, elapsed.Seconds())
+	return text, false, nil
+}
+
+// outputLimit is the most tokens an Ollama reply may use. A findings list
+// needs far less than 2048; a model that thinks needs room for that too.
+func outputLimit(p Provider) int {
+	switch {
+	case p.MaxTokens > 0:
+		return p.MaxTokens
+	case p.Think != nil && !*p.Think:
+		return 2048
+	default:
+		return 8192
+	}
+}
+
+// stats is what a provider reports about one call.
+type stats struct {
+	promptTokens, outputTokens int
+	promptDur, outputDur       time.Duration // ollama only
+	loadDur                    time.Duration // ollama only: time to load the model
+	thinkingChars              int           // ollama only
+}
+
+func (s stats) String() string {
+	rate := func(n int, d time.Duration) string {
+		if n == 0 || d <= 0 {
+			return ""
+		}
+		return fmt.Sprintf(" (%.0f tok/s)", float64(n)/d.Seconds())
+	}
+	out := fmt.Sprintf("prompt %d tok%s, output %d tok%s", s.promptTokens, rate(s.promptTokens, s.promptDur), s.outputTokens, rate(s.outputTokens, s.outputDur))
+	if s.thinkingChars > 0 {
+		out += fmt.Sprintf(", %d chars of thinking", s.thinkingChars)
+	}
+	if s.loadDur > time.Second {
+		out += fmt.Sprintf(", model load %.1fs", s.loadDur.Seconds())
+	}
+	return out
+}
+
+// estimateTokens is a rough count for a prompt: code and English average
+// about 3.5 characters per token.
+func estimateTokens(msgs []Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n * 2 / 7
 }
 
 func isConnRefused(err error) bool {
@@ -496,7 +630,13 @@ func isConnRefused(err error) bool {
 // ChatJSON sends messages and decodes the reply as JSON into out, asking once
 // more if the first reply is not valid JSON.
 func (c *Client) ChatJSON(ctx context.Context, msgs []Message, out any) error {
-	text, err := c.Chat(ctx, msgs)
+	return c.ChatSchema(ctx, msgs, nil, out)
+}
+
+// ChatSchema is ChatJSON with a JSON schema the reply must match. Ollama
+// enforces the schema; other APIs get JSON mode and the prompt's description.
+func (c *Client) ChatSchema(ctx context.Context, msgs []Message, schema any, out any) error {
+	text, err := c.chat(ctx, msgs, schema)
 	if err != nil {
 		return err
 	}
@@ -506,7 +646,7 @@ func (c *Client) ChatJSON(ctx context.Context, msgs []Message, out any) error {
 	msgs = append(msgs,
 		Message{Role: "assistant", Content: text},
 		Message{Role: "user", Content: "That was not valid JSON. Reply with only the JSON object, nothing else."})
-	text, err2 := c.Chat(ctx, msgs)
+	text, err2 := c.chat(ctx, msgs, schema)
 	if err2 != nil {
 		return err2
 	}

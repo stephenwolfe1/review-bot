@@ -170,8 +170,11 @@ func authorOf(t *fakeThread) string {
 // ---- fake Ollama ----
 
 type fakeLLM struct {
-	mu    sync.Mutex
-	calls map[string]int
+	mu             sync.Mutex
+	calls          map[string]int
+	verifySeverity string   // what the fake verifier says; "" = agree
+	lastVerify     string   // the last verify prompt
+	schemaKeys     []string // kind.property for each schema received
 }
 
 func (l *fakeLLM) handler() http.Handler {
@@ -181,11 +184,14 @@ func (l *fakeLLM) handler() http.Handler {
 			return
 		}
 		var req struct {
-			Format   string        `json:"format"`
+			Format   any           `json:"format"`
 			Messages []llm.Message `json:"messages"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		// The check's instructions are at the end of the user message, so
+		// match on the whole prompt.
 		sys, user := req.Messages[0].Content, req.Messages[len(req.Messages)-1].Content
+		sys += "\n" + user
 		var reply string
 		var kind string
 		switch {
@@ -194,15 +200,20 @@ func (l *fakeLLM) handler() http.Handler {
 			reply = `{"findings":[]}`
 			if !strings.Contains(user, "if y == 0") {
 				// Wrap in a think block and prose to exercise ExtractJSON.
-				reply = "<think>y may be zero</think>Here you go:\n" + `{"findings":[{"line":4,"end_line":4,"severity":"high","title":"Division by zero when y is 0","body":"Div panics when y is 0.","suggestion":"\tif y == 0 {\n\t\treturn 0\n\t}\n\treturn x / y","confidence":0.9},` +
-					`{"line":1,"end_line":1,"severity":"low","title":"Low confidence nit","body":"meh","suggestion":"","confidence":0.3}]}`
+				reply = "<think>y may be zero</think>Here you go:\n" + `{"findings":[{"line":4,"end_line":4,"severity":"high","title":"Division by zero when y is 0","body":"Div panics when y is 0.","example":"Div(1, 0) panics; it should return 0","suggestion":"\tif y == 0 {\n\t\treturn 0\n\t}\n\treturn x / y","confidence":0.9},` +
+					`{"line":1,"end_line":1,"severity":"low","title":"Low confidence nit","body":"meh","example":"x","suggestion":"","confidence":0.3},` +
+					`{"line":3,"end_line":3,"severity":"high","title":"Vague worry with no example","body":"This could break.","example":"","suggestion":"","confidence":0.95}]}`
 			}
 		case strings.Contains(sys, "security engineer"):
 			kind = "security"
 			reply = `{"findings":[]}`
 		case strings.Contains(sys, "double-checking"):
 			kind = "verify"
-			reply = `{"valid":true,"suggestion_ok":true,"reason":"real"}`
+			l.mu.Lock()
+			l.lastVerify = user
+			sev := l.verifySeverity
+			l.mu.Unlock()
+			reply = fmt.Sprintf(`{"valid":true,"suggestion_ok":true,"severity":%q,"reason":"real"}`, sev)
 		case strings.Contains(sys, "earlier automated review comment"):
 			kind = "resolve"
 			reply = `{"status":"not_fixed","reason":"still divides"}`
@@ -216,6 +227,13 @@ func (l *fakeLLM) handler() http.Handler {
 		}
 		l.mu.Lock()
 		l.calls[kind]++
+		if f, ok := req.Format.(map[string]any); ok {
+			if props, ok := f["properties"].(map[string]any); ok {
+				for k := range props {
+					l.schemaKeys = append(l.schemaKeys, kind+"."+k)
+				}
+			}
+		}
 		l.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"role": "assistant", "content": reply}})
 	})
@@ -420,6 +438,9 @@ func TestSanitizeText(t *testing.T) {
 		"<img src=x onerror=alert(1)> & <!-- review-bot:finding x -->": "&lt;img src=x onerror=alert(1)&gt; &amp; &lt;!-- review-bot:finding x --&gt;",
 		"`a < b && @x` stays, but < here doesn't":                      "`a < b && @x` stays, but &lt; here doesn't",
 		"unmatched ` backtick <b>":                                     "unmatched ` backtick &lt;b&gt;",
+		"``a ` b`` then <x>":                                           "``a ` b`` then &lt;x&gt;",
+		"`one` and ```three @y``` but @z":                              "`one` and ```three @y``` but @\u200bz",
+		"``` unclosed fence <x>":                                       "``` unclosed fence &lt;x&gt;",
 	} {
 		if got := sanitizeText(in); got != want {
 			t.Errorf("sanitizeText(%q)\n got %q\nwant %q", in, got, want)
@@ -447,5 +468,81 @@ func TestCommentIsSanitized(t *testing.T) {
 	}
 	if m, ok := DecodeMeta(c.Body); !ok || m.Title != "Bad\nthing @bob" {
 		t.Errorf("marker should keep the raw title: %+v", m)
+	}
+}
+
+func TestVerifierSeesChangeAndCanLowerSeverity(t *testing.T) {
+	fg, fl, r := setup(t)
+	fl.verifySeverity = "medium"
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the Div finding is posted: the nit is low-confidence and the
+	// vague one has no example.
+	if res.Posted != 1 || len(fg.threads) != 1 {
+		t.Fatalf("posted %d: %+v", res.Posted, res)
+	}
+	body := fg.threads[0].Bodies[0]
+	if !strings.Contains(body, "🟠 **Medium · Bugs**") || !strings.Contains(body, "**Example:** Div(1, 0) panics") {
+		t.Errorf("severity not lowered or example missing:\n%s", body)
+	}
+	if res.Failed {
+		t.Error("a medium finding shouldn't fail the check at REVIEW_FAIL_ON=high")
+	}
+	// The verifier is shown the lines the suggestion would replace.
+	for _, want := range []string{"replaces lines 4-4, which are currently:", "4  \treturn x / y", "Example: Div(1, 0) panics"} {
+		if !strings.Contains(fl.lastVerify, want) {
+			t.Errorf("verify prompt missing %q:\n%s", want, fl.lastVerify)
+		}
+	}
+}
+
+func TestVerifierCannotRaiseSeverity(t *testing.T) {
+	fg, fl, r := setup(t)
+	fl.verifySeverity = "critical"
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fg.threads[0].Bodies[0], "🔴 **High · Bugs**") {
+		t.Errorf("severity should stay high:\n%s", fg.threads[0].Bodies[0])
+	}
+}
+
+func TestRepliesAreSchemaConstrained(t *testing.T) {
+	fg, fl, r := setup(t)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fg.head = "bbbbbbb2222222"
+	fg.files[0].Patch = p2
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(fl.schemaKeys, " ")
+	for _, want := range []string{"bugs.findings", "security.findings", "verify.valid", "verify.severity", "resolve.status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no schema with %s; got %s", want, got)
+		}
+	}
+}
+
+func TestSchemaKeepsPropertyOrder(t *testing.T) {
+	b, err := json.Marshal(findingsSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	order := []string{`"line"`, `"end_line"`, `"severity"`, `"title"`, `"body"`, `"example"`, `"suggestion"`, `"confidence"`}
+	last := -1
+	for _, k := range order {
+		i := strings.Index(js, k)
+		if i <= last {
+			t.Fatalf("%s out of order in %s", k, js)
+		}
+		last = i
+	}
+	if !json.Valid(b) {
+		t.Fatal("invalid JSON")
 	}
 }
