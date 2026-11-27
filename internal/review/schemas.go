@@ -31,11 +31,13 @@ var findingsSchema = obj(
 	}},
 )
 
+// The analysis comes first, so the model traces the code before it commits
+// to a verdict.
 var verifySchema = obj(
+	prop{"analysis", typ("string")},
 	prop{"valid", typ("boolean")},
 	prop{"suggestion_ok", typ("boolean")},
 	prop{"severity", enum(severityEnum...)},
-	prop{"reason", typ("string")},
 )
 
 var resolveSchema = obj(

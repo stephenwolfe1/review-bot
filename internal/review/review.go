@@ -415,8 +415,7 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		if f.Title == "" || strings.TrimSpace(f.Body) == "" {
 			continue
 		}
-		if !concreteExample(f.Example) {
-			r.logf("dropped %s:%d %q: its example names no specific value (%q)", f.Path, f.Line, f.Title, truncate(oneLine(f.Example), 120))
+		if !r.exampleOK(&f) {
 			continue
 		}
 		if SeverityRank(f.Severity) < minSev || f.Confidence < r.Cfg.MinConfidence {
@@ -453,7 +452,9 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		dup := false
 		for i, o := range out {
 			if similar(f.Path, f.Line, f.Title, f.Category, o.Path, o.Line, o.Title, o.Category) {
-				if SeverityRank(f.Severity) > SeverityRank(o.Severity) {
+				// Keep the more severe one; on a tie, prefer the security label.
+				if SeverityRank(f.Severity) > SeverityRank(o.Severity) ||
+					(SeverityRank(f.Severity) == SeverityRank(o.Severity) && f.Category == "security" && o.Category != "security") {
 					out[i] = f
 				}
 				dup = true
@@ -465,6 +466,28 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		}
 	}
 	return out
+}
+
+// exampleOK applies the example rules (see concrete.go). It may lower the
+// finding's severity; false means drop it.
+func (r *Reviewer) exampleOK(f *Finding) bool {
+	ex := strings.TrimSpace(f.Example)
+	if ex == "" {
+		r.logf("dropped %s:%d %q: no example", f.Path, f.Line, f.Title)
+		return false
+	}
+	if f.Category == "security" {
+		return true
+	}
+	if !exampleHasValue(ex) {
+		r.logf("dropped %s:%d %q: its example names no specific value (%q)", f.Path, f.Line, f.Title, truncate(oneLine(ex), 120))
+		return false
+	}
+	if exampleHedged(ex) && SeverityRank(f.Severity) > SeverityRank("medium") {
+		r.logf("%s:%d %q: hedged example, severity %s -> medium", f.Path, f.Line, f.Title, f.Severity)
+		f.Severity = "medium"
+	}
+	return true
 }
 
 func dupOfThread(f Finding, bot []botThread) bool {
@@ -489,7 +512,9 @@ func similar(p1 string, l1 int, t1, c1, p2 string, l2 int, t2, c2 string) bool {
 	if d > 8 {
 		return false
 	}
-	if c1 == c2 && d <= 2 {
+	// Within 2 lines is the same problem, whichever check found it: the bugs
+	// and security checks often both flag one line.
+	if d <= 2 {
 		return true
 	}
 	return jaccard(words(t1), words(t2)) >= 0.4
@@ -564,10 +589,11 @@ func (r *Reviewer) verify(ctx context.Context, fileContext string, f Finding, co
 		}
 	}
 	var out struct {
+		Analysis     string `json:"analysis"`
 		Valid        bool   `json:"valid"`
 		SuggestionOK *bool  `json:"suggestion_ok"`
 		Severity     string `json:"severity"`
-		Reason       string `json:"reason"`
+		Reason       string `json:"reason"` // older replies
 	}
 	if err := r.LLM.ChatSchema(ctx, messages(fileContext, b.String()), verifySchema, &out); err != nil {
 		return verdict{}, err
@@ -576,7 +602,7 @@ func (r *Reviewer) verify(ctx context.Context, fileContext string, f Finding, co
 		Valid:        out.Valid,
 		SuggestionOK: out.SuggestionOK == nil || *out.SuggestionOK,
 		Severity:     strings.TrimSpace(out.Severity),
-		Reason:       out.Reason,
+		Reason:       firstNonEmpty(out.Analysis, out.Reason),
 	}, nil
 }
 
@@ -751,6 +777,15 @@ func (r *Reviewer) isBot(login string) bool {
 
 // DefaultBotLogins is the account GITHUB_TOKEN posts as.
 var DefaultBotLogins = []string{"github-actions[bot]"}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 

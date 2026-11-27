@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"review-bot/internal/diff"
 	"review-bot/internal/gh"
 	"review-bot/internal/llm"
 )
@@ -215,7 +216,7 @@ func (l *fakeLLM) handler() http.Handler {
 			l.lastVerify = user
 			sev := l.verifySeverity
 			l.mu.Unlock()
-			reply = fmt.Sprintf(`{"valid":true,"suggestion_ok":true,"severity":%q,"reason":"real"}`, sev)
+			reply = fmt.Sprintf(`{"analysis":"Div(1, 0) divides by zero and panics, so the problem is real.","valid":true,"suggestion_ok":true,"severity":%q}`, sev)
 		case strings.Contains(sys, "earlier automated review comment"):
 			kind = "resolve"
 			reply = `{"status":"not_fixed","reason":"still divides"}`
@@ -602,5 +603,26 @@ func TestTestsIgnore(t *testing.T) {
 		if ignored(p, TestsIgnore) {
 			t.Errorf("%s should still be reviewed", p)
 		}
+	}
+}
+
+func TestDuplicatesMergeAcrossChecks(t *testing.T) {
+	r := &Reviewer{Cfg: Config{MinSeverity: "low", MinConfidence: 0.5}}
+	p := map[string]*diff.Patch{"a.go": diff.Parse("@@ -0,0 +1,3 @@\n+a\n+b\n+c")}
+	ex := "Total([]int{1}) panics with index 1 out of range"
+	in := []Finding{
+		{Path: "a.go", Line: 2, Category: "bugs", Severity: "high", Title: "Off-by-one error in loop bounds", Body: "x", Example: ex, Confidence: 0.9},
+		{Path: "a.go", Line: 2, Category: "security", Severity: "high", Title: "Array bounds violation", Body: "x", Example: ex, Confidence: 0.9},
+	}
+	out := r.filter(in, p, nil)
+	if len(out) != 1 || out[0].Category != "security" {
+		t.Fatalf("want one finding, labelled security on a tie: %+v", out)
+	}
+}
+
+// Old-style verdicts with "reason" still work.
+func TestVerdictReasonFallback(t *testing.T) {
+	if firstNonEmpty("", "  ", "because") != "because" || firstNonEmpty("analysis", "reason") != "analysis" {
+		t.Error("firstNonEmpty")
 	}
 }

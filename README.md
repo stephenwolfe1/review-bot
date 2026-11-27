@@ -65,15 +65,18 @@ Each run, triggered by a push to a pull request:
    "✅ Addressed in `abc1234`" and resolve the thread.
 3. **Review.** For each changed file, send the line-numbered diff plus the whole
    file as context, once per check (bugs, security).
-4. **Filter.** Every finding must come with a concrete failing example that
-   names a specific value (a number, a quoted string, nil, empty, …) and is
-   definite, with no "could", "may" or "might". Findings without one are
-   dropped. This check is done in code, not left to the model. So are low-confidence findings, lines outside the
+4. **Filter.** Every finding must come with a failing example. A bug's
+   example must name a specific value (a number, a quoted string, nil,
+   empty, …) or the finding is dropped. One worded as "may" or "could" is
+   capped at Medium. Security examples are naturally worded that way ("an
+   attacker could…"), so they only need to be present. These checks are done
+   in code, not left to the model. Findings within 2 lines of each other are
+   merged, even when the bugs and security checks both flagged the line. So are low-confidence findings, lines outside the
    diff, and duplicates, including anything already raised (resolved threads
    count).
-5. **Verify.** A second model call per finding traces its example through the
-   code and rejects false positives, including any finding whose example
-   isn't concrete. For files too big to send whole, it also gets the
+5. **Verify.** A second model call per finding writes its analysis of the
+   example first, then decides whether the problem is real. A wrong
+   suggestion only removes the suggestion, never the finding. For files too big to send whole, it also gets the
    definitions the finding names from elsewhere in the file, so it can check
    claims like "this call doesn't match the function". It sees exactly which lines a suggested
    change would replace, and drops suggestions that are wrong or would remove
