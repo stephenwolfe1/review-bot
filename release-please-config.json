@@ -19,6 +19,8 @@
   "packages": {
     ".": {
       "release-type": "go",
+      "release-as": "0.1.0",
+      "bump-minor-pre-major": true,
       "package-name": "review-bot",
       "changelog-path": "CHANGELOG.md"
     }
