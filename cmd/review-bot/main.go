@@ -80,6 +80,9 @@ func main() {
 	lc := &llm.Client{Providers: providers, HTTP: llm.NewHTTPClient(timeout), Logf: logger.Printf}
 
 	ignore := append([]string{}, review.DefaultIgnore...)
+	if !envBool("REVIEW_DOCS", false) {
+		ignore = append(ignore, review.DocsIgnore...)
+	}
 	ignore = append(ignore, splitList(os.Getenv("REVIEW_IGNORE"))...)
 	cfg := review.Config{
 		PR:            *prNum,

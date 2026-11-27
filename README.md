@@ -305,7 +305,8 @@ Every profile runs both checks (bugs and security) and verifies each finding.
 | `REVIEW_MAX_FILES` | from the profile | |
 | `REVIEW_MAX_PATCH_LINES` | from the profile | larger file diffs are skipped and listed in the summary |
 | `REVIEW_FULL_FILE_LINES` | from the profile | send the whole file as context up to this size |
-| `REVIEW_IGNORE` | | extra comma-separated globs, e.g. `docs/**,CHANGELOG.md`. Lockfiles, images, `vendor/` and `.pbxproj` are always skipped. |
+| `REVIEW_IGNORE` | | extra comma-separated globs, e.g. `generated/**,**/*_test.go`. Lockfiles, images, `vendor/` and `.pbxproj` are always skipped. |
+| `REVIEW_DOCS` | `false` | `true` also reviews documentation (`*.md`, `*.rst`, `docs/`, `LICENSE`), which is skipped by default |
 | `REVIEW_FAIL_ON` | | e.g. `high`: fail the check while open findings at or above it exist. A quality gate, not a security control; see [Security](#security). |
 | `REVIEW_BOT_LOGIN` | `github-actions[bot]` | the account the bot posts as; only its comments are trusted. Set it if you run the bot with another token, e.g. `my-app[bot]`. |
 | `REVIEW_DRAFTS` | `false` | review draft PRs |

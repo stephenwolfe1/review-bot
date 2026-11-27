@@ -57,6 +57,14 @@ var DefaultIgnore = []string{
 	"**/*.svg", "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.pdf", "**/*.pbxproj", "**/*.xcassets/**",
 }
 
+// DocsIgnore skips documentation, which a bug and security reviewer has
+// nothing useful to say about. REVIEW_DOCS=true reviews it anyway. Secrets
+// pasted into docs are better caught by secret scanning.
+var DocsIgnore = []string{
+	"**/*.md", "**/*.mdx", "**/*.markdown", "**/*.rst", "**/*.adoc",
+	"docs/**", "**/docs/**", "LICENSE*", "**/LICENSE*", "COPYING*",
+}
+
 // Result summarises a run.
 type Result struct {
 	HeadSHA     string

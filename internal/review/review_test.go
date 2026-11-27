@@ -571,3 +571,18 @@ func TestVerifyReusesTheFilesPromptPrefix(t *testing.T) {
 		t.Fatalf("prefix should hold the file: %q", fl.prefixes[0])
 	}
 }
+
+func TestDocsIgnore(t *testing.T) {
+	skip := []string{"README.md", "docs/setup.md", "deploy/arc/README.md", "site/docs/guide.html", "LICENSE", "sub/LICENSE.txt", "notes.rst", "page.mdx"}
+	keep := []string{"main.go", "CMakeLists.txt", "requirements.txt", "internal/review/prompts.go", "scripts/doc_gen.py", "markdown.go"}
+	for _, p := range skip {
+		if !ignored(p, DocsIgnore) {
+			t.Errorf("%s should be skipped as docs", p)
+		}
+	}
+	for _, p := range keep {
+		if ignored(p, append(append([]string{}, DefaultIgnore...), DocsIgnore...)) {
+			t.Errorf("%s should still be reviewed", p)
+		}
+	}
+}
