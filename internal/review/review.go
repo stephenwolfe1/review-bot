@@ -398,8 +398,8 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 		if f.Title == "" || strings.TrimSpace(f.Body) == "" {
 			continue
 		}
-		if strings.TrimSpace(f.Example) == "" {
-			r.logf("dropped %s:%d %q: no concrete failing example", f.Path, f.Line, f.Title)
+		if !concreteExample(f.Example) {
+			r.logf("dropped %s:%d %q: its example names no specific value (%q)", f.Path, f.Line, f.Title, truncate(oneLine(f.Example), 120))
 			continue
 		}
 		if SeverityRank(f.Severity) < minSev || f.Confidence < r.Cfg.MinConfidence {

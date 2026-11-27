@@ -65,8 +65,9 @@ Each run, triggered by a push to a pull request:
    "✅ Addressed in `abc1234`" and resolve the thread.
 3. **Review.** For each changed file, send the line-numbered diff plus the whole
    file as context, once per check (bugs, security).
-4. **Filter.** Every finding must come with a concrete failing example, and
-   ones without are dropped. So are low-confidence findings, lines outside the
+4. **Filter.** Every finding must come with a concrete failing example that
+   names a specific value (a number, a quoted string, nil, empty, …), and ones
+   without are dropped. This check is done in code, not left to the model. So are low-confidence findings, lines outside the
    diff, and duplicates, including anything already raised (resolved threads
    count).
 5. **Verify.** A second model call per finding traces its example through the
