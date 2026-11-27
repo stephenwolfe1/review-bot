@@ -70,7 +70,10 @@ Each run, triggered by a push to a pull request:
    diff, and duplicates, including anything already raised (resolved threads
    count).
 5. **Verify.** A second model call per finding traces its example through the
-   code and rejects false positives. It sees exactly which lines a suggested
+   code and rejects false positives, including any finding whose example
+   isn't concrete. For files too big to send whole, it also gets the
+   definitions the finding names from elsewhere in the file, so it can check
+   claims like "this call doesn't match the function". It sees exactly which lines a suggested
    change would replace, and drops suggestions that are wrong or would remove
    needed code. It can lower a finding's severity, never raise it.
 6. **Post.** One review with inline comments, and an updated summary comment

@@ -535,8 +535,16 @@ func (r *Reviewer) verify(ctx context.Context, fileContext string, f Finding, co
 		}
 	}
 	if content != "" && !r.fullFile(content) {
-		// The file was too big to include in full; show the code around the finding.
-		fmt.Fprintf(&b, "\nCode around the finding:\n<<<\n%s>>>\n", diff.NumberLines(content, f.Line-60, f.EndLine+60))
+		// The file was too big to include in full: show the code around the
+		// finding, and the definitions it names from elsewhere in the file.
+		from, to := f.Line-60, f.EndLine+60
+		if to < f.Line+60 {
+			to = f.Line + 60
+		}
+		fmt.Fprintf(&b, "\nCode around the finding:\n<<<\n%s>>>\n", diff.NumberLines(content, from, to))
+		if defs := definitionsFor(f, content, from, to); defs != "" {
+			fmt.Fprintf(&b, "\nDefinitions the finding refers to, from elsewhere in this file:\n%s", defs)
+		}
 	}
 	var out struct {
 		Valid        bool   `json:"valid"`
