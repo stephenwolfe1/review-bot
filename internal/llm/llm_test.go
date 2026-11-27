@@ -318,3 +318,58 @@ func TestOutputLimit(t *testing.T) {
 		t.Fatalf("explicit limit = %v", gotLimit)
 	}
 }
+
+func TestSchemaFormatAndFallback(t *testing.T) {
+	var formats []any
+	var batch any
+	rejectSchema := false
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Format  any            `json:"format"`
+			Options map[string]any `json:"options"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		formats = append(formats, body.Format)
+		batch = body.Options["num_batch"]
+		if _, isObj := body.Format.(map[string]any); isObj && rejectSchema {
+			http.Error(w, `{"error":"invalid format: expected \"json\" or a JSON schema"}`, 400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"content": `{"ok":true}`}})
+	}))
+	defer s.Close()
+	schema := map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}, "required": []string{"ok"}}
+	var out struct{ OK bool }
+	ctx := context.Background()
+	msgs := []Message{{Role: "user", Content: "hi"}}
+
+	c := &Client{Providers: resolve(t, Provider{API: "ollama", BaseURL: s.URL, Model: "m", NumBatch: 1024})}
+	if err := c.ChatSchema(ctx, msgs, schema, &out); err != nil || !out.OK {
+		t.Fatalf("%v %+v", err, out)
+	}
+	if f, ok := formats[0].(map[string]any); !ok || f["type"] != "object" {
+		t.Fatalf("schema not sent as format: %#v", formats[0])
+	}
+	if batch != float64(1024) {
+		t.Fatalf("num_batch = %v", batch)
+	}
+	// Plain ChatJSON still sends "json".
+	formats = nil
+	_ = c.ChatJSON(ctx, msgs, &out)
+	if formats[0] != "json" {
+		t.Fatalf("format = %#v", formats[0])
+	}
+
+	// A server that rejects schemas: retry at once with "json", and remember.
+	formats = nil
+	rejectSchema = true
+	c2 := &Client{Providers: resolve(t, Provider{API: "ollama", BaseURL: s.URL, Model: "m"})}
+	for i := 0; i < 2; i++ {
+		if err := c2.ChatSchema(ctx, msgs, schema, &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(formats) != 3 || formats[1] != "json" || formats[2] != "json" {
+		t.Fatalf("formats = %#v", formats)
+	}
+}

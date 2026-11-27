@@ -110,6 +110,9 @@ func main() {
 			if p.Think != nil {
 				extra += fmt.Sprintf(" think=%t", *p.Think)
 			}
+			if p.NumBatch > 0 {
+				extra += fmt.Sprintf(" num_batch=%d", p.NumBatch)
+			}
 		}
 		logger.Printf("provider %d: %s model=%s%s", i+1, p.Name, p.Model, extra)
 	}
@@ -148,6 +151,9 @@ func loadProviders() ([]llm.Provider, error) {
 			if ps[i].MaxTokens == 0 {
 				ps[i].MaxTokens = envInt("LLM_MAX_TOKENS", 0)
 			}
+			if ps[i].NumBatch == 0 {
+				ps[i].NumBatch = envInt("LLM_NUM_BATCH", 0)
+			}
 		}
 		return ps, nil
 	}
@@ -162,7 +168,7 @@ func loadProviders() ([]llm.Provider, error) {
 	}
 	var out []llm.Provider
 	for _, u := range urls {
-		p := llm.Provider{API: api, BaseURL: u, Model: model, APIKey: os.Getenv("LLM_API_KEY"), NumCtx: envInt("LLM_NUM_CTX", 0), Think: think, MaxTokens: envInt("LLM_MAX_TOKENS", 0)}
+		p := llm.Provider{API: api, BaseURL: u, Model: model, APIKey: os.Getenv("LLM_API_KEY"), NumCtx: envInt("LLM_NUM_CTX", 0), Think: think, MaxTokens: envInt("LLM_MAX_TOKENS", 0), NumBatch: envInt("LLM_NUM_BATCH", 0)}
 		if t := os.Getenv("LLM_TEMPERATURE"); t != "" {
 			f := envFloat("LLM_TEMPERATURE", 0.1)
 			p.Temperature = &f
