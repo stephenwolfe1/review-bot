@@ -175,6 +175,8 @@ type fakeLLM struct {
 	verifySeverity string   // what the fake verifier says; "" = agree
 	lastVerify     string   // the last verify prompt
 	schemaKeys     []string // kind.property for each schema received
+	order          []string // kind of each call, in order
+	prefixes       []string // system prompt + user message up to "Your task:"
 }
 
 func (l *fakeLLM) handler() http.Handler {
@@ -227,6 +229,12 @@ func (l *fakeLLM) handler() http.Handler {
 		}
 		l.mu.Lock()
 		l.calls[kind]++
+		l.order = append(l.order, kind)
+		full := req.Messages[0].Content + "\x00" + req.Messages[len(req.Messages)-1].Content
+		if i := strings.Index(full, "Your task:"); i >= 0 {
+			full = full[:i]
+		}
+		l.prefixes = append(l.prefixes, full)
 		if f, ok := req.Format.(map[string]any); ok {
 			if props, ok := f["properties"].(map[string]any); ok {
 				for k := range props {
@@ -544,5 +552,22 @@ func TestSchemaKeepsPropertyOrder(t *testing.T) {
 	}
 	if !json.Valid(b) {
 		t.Fatal("invalid JSON")
+	}
+}
+
+func TestVerifyReusesTheFilesPromptPrefix(t *testing.T) {
+	_, fl, r := setup(t)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// calc.go: both checks, then its verification right away.
+	if got := strings.Join(fl.order, ","); got != "bugs,security,verify" {
+		t.Fatalf("call order = %s", got)
+	}
+	if fl.prefixes[0] != fl.prefixes[1] || fl.prefixes[0] != fl.prefixes[2] {
+		t.Fatalf("prompts don't share a prefix:\n%q\n%q\n%q", fl.prefixes[0], fl.prefixes[1], fl.prefixes[2])
+	}
+	if !strings.Contains(fl.prefixes[0], "File: calc.go") || !strings.Contains(fl.prefixes[0], "Full file after the change") {
+		t.Fatalf("prefix should hold the file: %q", fl.prefixes[0])
 	}
 }

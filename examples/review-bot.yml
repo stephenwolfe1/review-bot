@@ -51,5 +51,7 @@ jobs:
           # Only needed for hosted providers in LLM_PROVIDERS; unset secrets are empty.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # lite (laptops, small models), standard (default) or full:
+          # REVIEW_PROFILE: standard
           # Uncomment to fail the check while high/critical findings are open:
           # REVIEW_FAIL_ON: high

@@ -180,10 +180,10 @@ Failover works like this:
 | `base_url` | overrides the default |
 | `name` | label for logs (default `api@host`) |
 | `api_key_env` | read the key from this variable instead of the default |
-| `num_ctx` | Ollama context window (default 16384) |
+| `num_ctx` | Ollama context window (default: `LLM_NUM_CTX`, or the profile's) |
 | `num_batch` | Ollama: prompt tokens processed at once (Ollama's default 512). Higher can read prompts faster. |
 | `temperature` | default 0.1 for Ollama. Other APIs use the provider's default, since some newer hosted models reject custom values. |
-| `think` | Ollama only: `false` turns a thinking model's reasoning off, `true` turns it on |
+| `think` | Ollama only: `true` turns a thinking model's reasoning on (default: `LLM_THINK`, which is off) |
 | `max_tokens` | output limit per reply. Ollama: 2048 with `think: false`, otherwise 8192. Anthropic: 8192. |
 | `json_mode` | OpenAI-compatible only. Sends `response_format` (default true) and turns it off automatically if the server rejects it. |
 
@@ -208,17 +208,20 @@ review-bot:   ollama@gpu-box:11434 (qwen3-coder:30b): prompt 9120 tok (1450 tok/
 
 If it's slow:
 
-- **Turn off thinking.** Reasoning models write thousands of hidden tokens
-  before every answer. If the log shows "chars of thinking", set
-  `LLM_THINK=false`.
+- **Thinking is off by default.** Reasoning models (Qwen3, DeepSeek-R1, …)
+  would otherwise write thousands of hidden tokens before every answer, which
+  makes a review many times slower. `LLM_THINK=true` turns it back on. It's
+  slower, and can catch subtler bugs. The log shows "chars of thinking" when
+  a model is thinking.
 - **Prefer a mixture-of-experts coding model.** `qwen3-coder:30b` activates
   only about 3B parameters per token, so it usually generates faster than a
   dense 7–9B model. It also doesn't think, and it's better at code. It needs
   about 20 GB of memory.
 - **Use a 4-bit quantization** if the model offers one: generation speed is
   mostly limited by memory bandwidth, so a smaller model file is faster.
-- **Make fewer calls while testing:** `REVIEW_CHECKS=bugs` and
-  `REVIEW_VERIFY=false`.
+- **Use `REVIEW_PROFILE=lite`** on a laptop or with a small model: less
+  context per file and fewer, more serious findings. While testing,
+  `REVIEW_CHECKS=bugs` makes fewer calls.
 - **Replies are constrained to a schema.** With Ollama, the bot sends the JSON
   schema of the reply it expects, so the model can only write a reply of that
   shape and stops when it's complete. Older Ollama versions that don't accept
@@ -237,13 +240,43 @@ If it's slow:
   bot logs a warning when that happens. Raise `LLM_NUM_CTX` or lower
   `REVIEW_FULL_FILE_LINES`.
 
-The checks for a file share the same prompt up to their instructions, so
-Ollama reuses its cached reading of the file and the second check starts
-almost straight away.
+Every call about a file (each check, then each finding's verification)
+sends the same prompt up to its instructions, and they run back to back. So
+Ollama reads the file once, reuses its cached reading for the rest, and each
+later call starts almost straight away.
 
 ## Configuration
 
-Everything is set through environment variables.
+Everything is set through environment variables. Most setups need only the
+GitHub token, a model server and, optionally, a profile:
+
+```yaml
+env:
+  GITHUB_TOKEN: ${{ github.token }}
+  LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+  REVIEW_PROFILE: standard
+```
+
+### Profiles
+
+`REVIEW_PROFILE` sets the review settings below as a group. Any of them set
+on its own still overrides the profile.
+
+| | `lite` | `standard` (default) | `full` |
+|---|---|---|---|
+| For | laptops, small models, quick feedback | most setups | a strong model with time to spare |
+| `REVIEW_FULL_FILE_LINES` | 200 | 500 | 1500 |
+| `LLM_NUM_CTX` (Ollama) | 16384 | 16384 | 32768 |
+| `REVIEW_MAX_FILES` | 20 | 40 | 100 |
+| `REVIEW_MAX_PATCH_LINES` | 400 | 800 | 2000 |
+| `REVIEW_MAX_COMMENTS` | 8 | 15 | 25 |
+| `REVIEW_MIN_SEVERITY` | medium | low | low |
+| `REVIEW_MIN_CONFIDENCE` | 0.8 | 0.7 | 0.6 |
+| `REVIEW_VERIFY` | on | on | on |
+
+Every profile runs both checks (bugs and security) and verifies each finding.
+
+### All settings
 
 | Variable | Default | |
 |---|---|---|
@@ -253,20 +286,21 @@ Everything is set through environment variables.
 | `LLM_BASE_URL` | the API's default | comma-separated to try several servers in order |
 | `LLM_MODEL` | `qwen3-coder:30b` for Ollama | required for other APIs |
 | `LLM_API_KEY` | | key for the single provider |
-| `LLM_NUM_CTX` | `16384` | Ollama context window. Ollama's own default is too small for whole-file context. |
+| `LLM_NUM_CTX` | from the profile | Ollama context window, for every Ollama provider without its own `num_ctx`. Ollama's own default is too small for whole-file context. |
 | `LLM_TEMPERATURE` | | |
-| `LLM_THINK` | the model's default | `false` turns off "thinking" for Ollama models that do it (Qwen3, DeepSeek-R1, …). Much faster. Also applies to Ollama entries in `LLM_PROVIDERS` without their own `think`. |
+| `LLM_THINK` | `false` | `true` turns on "thinking" for Ollama models that do it (Qwen3, DeepSeek-R1, …): slower, sometimes more thorough. Also applies to Ollama entries in `LLM_PROVIDERS` without their own `think`. |
 | `LLM_NUM_BATCH` | Ollama's default (512) | see `num_batch`; also applies to `LLM_PROVIDERS` entries without their own |
 | `LLM_MAX_TOKENS` | see `max_tokens` | output limit per reply, for the single provider and for `LLM_PROVIDERS` entries without their own |
 | `LLM_TIMEOUT` | `10m` | per model call. Connecting to a server times out after 5s. |
+| `REVIEW_PROFILE` | `standard` | `lite`, `standard` or `full` ([Profiles](#profiles)) |
 | `REVIEW_CHECKS` | `bugs,security` | |
-| `REVIEW_MIN_SEVERITY` | `low` | `low`, `medium`, `high`, `critical` |
-| `REVIEW_MIN_CONFIDENCE` | `0.7` | the model's own 0–1 confidence |
-| `REVIEW_VERIFY` | `true` | second-opinion pass per finding |
-| `REVIEW_MAX_COMMENTS` | `15` | per run, highest severity first |
-| `REVIEW_MAX_FILES` | `40` | |
-| `REVIEW_MAX_PATCH_LINES` | `800` | larger file diffs are skipped and listed in the summary |
-| `REVIEW_FULL_FILE_LINES` | `500` | send the whole file as context up to this size |
+| `REVIEW_MIN_SEVERITY` | from the profile | `low`, `medium`, `high`, `critical` |
+| `REVIEW_MIN_CONFIDENCE` | from the profile | the model's own 0–1 confidence |
+| `REVIEW_VERIFY` | from the profile | second-opinion pass per finding |
+| `REVIEW_MAX_COMMENTS` | from the profile | per run, highest severity first |
+| `REVIEW_MAX_FILES` | from the profile | |
+| `REVIEW_MAX_PATCH_LINES` | from the profile | larger file diffs are skipped and listed in the summary |
+| `REVIEW_FULL_FILE_LINES` | from the profile | send the whole file as context up to this size |
 | `REVIEW_IGNORE` | | extra comma-separated globs, e.g. `docs/**,CHANGELOG.md`. Lockfiles, images, `vendor/` and `.pbxproj` are always skipped. |
 | `REVIEW_FAIL_ON` | | e.g. `high`: fail the check while open findings at or above it exist. A quality gate, not a security control; see [Security](#security). |
 | `REVIEW_BOT_LOGIN` | `github-actions[bot]` | the account the bot posts as; only its comments are trusted. Set it if you run the bot with another token, e.g. `my-app[bot]`. |

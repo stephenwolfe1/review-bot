@@ -96,7 +96,7 @@ func (p Provider) Resolve(getenv func(string) string) (Provider, error) {
 		p.Name = p.label(kind)
 	}
 	if p.API == "ollama" && p.NumCtx == 0 {
-		p.NumCtx = 16384
+		p.NumCtx = DefaultNumCtx
 	}
 	if p.API == "ollama" && p.Temperature == nil {
 		t := 0.1
@@ -122,6 +122,10 @@ func (p Provider) label(kind string) string {
 func (p Provider) needsKey() bool {
 	return p.APIKeyEnv != "" || p.API == "anthropic"
 }
+
+// DefaultNumCtx is the Ollama context window for providers that don't set
+// one. The command line sets it from LLM_NUM_CTX or the review profile.
+var DefaultNumCtx = 16384
 
 // ParseProviders reads a JSON array of providers (the LLM_PROVIDERS format).
 func ParseProviders(js string, getenv func(string) string) ([]Provider, error) {
