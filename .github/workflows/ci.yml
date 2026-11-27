@@ -10,14 +10,125 @@ on:
     paths-ignore:
       - CHANGELOG.md
       - .release-please-manifest.json
+  workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # The job name is a required status check in the main ruleset; keep it "test".
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        # Named explicitly so steps run with pipefail: a check piped into `tee` still fails the step.
+        shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+
+      - id: go
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make check
+
+      # Each check runs even if an earlier one failed, so the summary shows them all.
+      - id: fmt
+        name: Formatting
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: |
+          gofmt -l . | tee fmt.log
+          if [ -s fmt.log ]; then echo "::error::Not gofmt-formatted (run gofmt -w .)"; exit 1; fi
+
+      - id: vet
+        name: Vet
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: go vet ./... 2>&1 | tee vet.log
+
+      - id: test
+        name: Tests
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: |
+          set +e
+          go test -race -count=1 -coverpkg=./... -coverprofile=cover.out -json ./... > test.json
+          status=$?
+          set -e
+          # Readable log for the step output.
+          jq -rj 'select(.Action == "output") | .Output' test.json
+          exit $status
+
+      - id: build
+        name: Build (linux, darwin × amd64, arm64)
+        if: ${{ !cancelled() && steps.go.outcome == 'success' }}
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            echo "== $target"
+            CGO_ENABLED=0 GOOS=${target%/*} GOARCH=${target#*/} go build -trimpath -o /dev/null ./cmd/review-bot 2>&1
+          done | tee build.log
+
+      - name: Summary
+        if: always()
+        env:
+          FMT: ${{ steps.fmt.outcome }}
+          VET: ${{ steps.vet.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          GO_VERSION: ${{ steps.go.outputs.go-version }}
+        run: |
+          icon() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              "") echo "⚪ Not run" ;;
+              *) echo "⚪ $1" ;;
+            esac
+          }
+          lines() { if [ -s "$1" ]; then grep -c . "$1"; else echo 0; fi; }
+          # Test events with a test name, by action; 0 when there's no test.json.
+          tests() { if [ -f test.json ]; then jq -s --arg a "$1" '[.[] | select(.Test != null and .Action == $a)] | length' test.json; else echo 0; fi; }
+
+          fmt_files=$(lines fmt.log)
+          vet_issues=$( { grep -c '\.go:[0-9]' vet.log 2>/dev/null || true; } )
+          passed=$(tests pass); failed=$(tests fail); skipped=$(tests skip)
+          coverage="n/a"
+          if [ -s cover.out ]; then coverage=$(go tool cover -func=cover.out | awk '/^total:/ {print $NF}'); fi
+
+          {
+            echo "## review-bot checks"
+            echo
+            echo "| Check | Result | Details |"
+            echo "| --- | --- | --- |"
+            echo "| Formatting | $(icon "$FMT") | unformatted files: $fmt_files |"
+            echo "| Vet | $(icon "$VET") | ${vet_issues:-0} issues |"
+            echo "| Tests | $(icon "$TEST") | $passed passed, $failed failed, $skipped skipped · coverage $coverage |"
+            echo "| Build | $(icon "$BUILD") | linux, darwin × amd64, arm64 |"
+            echo
+            echo "Go ${GO_VERSION:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          details() {
+            { echo; echo "<details><summary>$1</summary>"; echo; echo '```'; cat; echo '```'; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          }
+          if [ -s fmt.log ]; then head -20 fmt.log | details "Files to format"; fi
+          if [ "$VET" = failure ] && [ -s vet.log ]; then head -30 vet.log | details "Vet output"; fi
+          if [ "$failed" != 0 ]; then
+            # Failed tests, then the output of each, capped.
+            jq -rs '[.[] | select(.Action == "fail" and .Test != null) | "\(.Package) \(.Test)"] | .[]' test.json \
+              | details "Failed tests"
+            jq -rjs '. as $all | [$all[] | select(.Action == "fail" and .Test != null) | {p: .Package, t: .Test}] as $f
+                | $all[] | select(.Action == "output" and .Test != null)
+                | select(. as $o | $f | any(.p == $o.Package and .t == $o.Test)) | .Output' test.json \
+              | head -100 | details "Failure output"
+          fi
+          if [ "$BUILD" = failure ] && [ -s build.log ]; then grep -v '^== ' build.log | head -30 | details "Build errors"; fi
+          if [ -f cover.out ]; then
+            go tool cover -func=cover.out \
+              | awk '$1 != "total:" {split($1, a, ":"); pct = $NF; sub(/%/, "", pct); n[a[1]]++; sum[a[1]] += pct}
+                     END {for (f in n) printf "%-50s %5.1f%%\n", f, sum[f] / n[f]}' \
+              | sort | details "Coverage by file (mean of functions)"
+          fi
