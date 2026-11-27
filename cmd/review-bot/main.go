@@ -104,7 +104,14 @@ func main() {
 	defer stop()
 
 	for i, p := range providers {
-		logger.Printf("provider %d: %s model=%s", i+1, p.Name, p.Model)
+		extra := ""
+		if p.API == "ollama" {
+			extra = fmt.Sprintf(" num_ctx=%d", p.NumCtx)
+			if p.Think != nil {
+				extra += fmt.Sprintf(" think=%t", *p.Think)
+			}
+		}
+		logger.Printf("provider %d: %s model=%s%s", i+1, p.Name, p.Model, extra)
 	}
 	if err := lc.Preflight(ctx); err != nil {
 		logger.Fatal(err)
@@ -127,8 +134,22 @@ func main() {
 // that is unset, the single-provider LLM_* variables. LLM_BASE_URL may hold
 // several comma-separated URLs, which are tried in order with the same model.
 func loadProviders() ([]llm.Provider, error) {
+	think := envOptBool("LLM_THINK")
 	if js := strings.TrimSpace(os.Getenv("LLM_PROVIDERS")); js != "" {
-		return llm.ParseProviders(js, os.Getenv)
+		ps, err := llm.ParseProviders(js, os.Getenv)
+		if err != nil {
+			return nil, err
+		}
+		// LLM_THINK applies to Ollama providers that don't set "think" themselves.
+		for i := range ps {
+			if ps[i].API == "ollama" && ps[i].Think == nil {
+				ps[i].Think = think
+			}
+			if ps[i].MaxTokens == 0 {
+				ps[i].MaxTokens = envInt("LLM_MAX_TOKENS", 0)
+			}
+		}
+		return ps, nil
 	}
 	api := env("LLM_API", "ollama")
 	urls := splitList(os.Getenv("LLM_BASE_URL"))
@@ -141,7 +162,7 @@ func loadProviders() ([]llm.Provider, error) {
 	}
 	var out []llm.Provider
 	for _, u := range urls {
-		p := llm.Provider{API: api, BaseURL: u, Model: model, APIKey: os.Getenv("LLM_API_KEY"), NumCtx: envInt("LLM_NUM_CTX", 0)}
+		p := llm.Provider{API: api, BaseURL: u, Model: model, APIKey: os.Getenv("LLM_API_KEY"), NumCtx: envInt("LLM_NUM_CTX", 0), Think: think, MaxTokens: envInt("LLM_MAX_TOKENS", 0)}
 		if t := os.Getenv("LLM_TEMPERATURE"); t != "" {
 			f := envFloat("LLM_TEMPERATURE", 0.1)
 			p.Temperature = &f
@@ -220,6 +241,15 @@ func envBool(k string, def bool) bool {
 		return b
 	}
 	return def
+}
+
+// envOptBool returns nil when k is unset or not a boolean.
+func envOptBool(k string) *bool {
+	b, err := strconv.ParseBool(env(k, ""))
+	if err != nil {
+		return nil
+	}
+	return &b
 }
 
 func splitList(s string) []string {

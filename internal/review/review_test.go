@@ -185,7 +185,10 @@ func (l *fakeLLM) handler() http.Handler {
 			Messages []llm.Message `json:"messages"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		// The check's instructions are at the end of the user message, so
+		// match on the whole prompt.
 		sys, user := req.Messages[0].Content, req.Messages[len(req.Messages)-1].Content
+		sys += "\n" + user
 		var reply string
 		var kind string
 		switch {

@@ -354,6 +354,10 @@ func (r *Reviewer) content(ctx context.Context, p, sha string) (string, error) {
 }
 
 func (r *Reviewer) reviewFile(ctx context.Context, pr *gh.PR, name string, p *diff.Patch, content, check string) ([]Finding, error) {
+	r.logf("%s [%s]: waiting on the model…", name, check)
+	// The file comes first and the check's instructions last, so every check
+	// of a file sends the same prompt prefix. Ollama reuses its cached reading
+	// of that prefix, and the second check only has to read the instructions.
 	var b strings.Builder
 	fmt.Fprintf(&b, "Pull request title: %s\n", pr.Title)
 	if desc := strings.TrimSpace(pr.Body); desc != "" {
@@ -363,10 +367,11 @@ func (r *Reviewer) reviewFile(ctx context.Context, pr *gh.PR, name string, p *di
 	if content != "" && r.Cfg.FullFileLines > 0 && strings.Count(content, "\n") <= r.Cfg.FullFileLines {
 		fmt.Fprintf(&b, "\nFull file after the change, for context:\n<<<\n%s>>>\n", diff.NumberLines(content, 1, 0))
 	}
+	b.WriteString("\nYour task:\n" + prompt(check))
 	b.WriteString("\nReview the added lines. Reply with the JSON object only.")
 
 	msgs := []llm.Message{
-		{Role: "system", Content: prompt(check) + "\n" + prompt("common")},
+		{Role: "system", Content: prompt("common")},
 		{Role: "user", Content: b.String()},
 	}
 	var out struct {
@@ -497,6 +502,7 @@ func jaccard(a, b map[string]bool) float64 {
 }
 
 func (r *Reviewer) verify(ctx context.Context, f Finding, p *diff.Patch, content string) (valid, sugOK bool, reason string, err error) {
+	r.logf("%s:%d: verifying %q…", f.Path, f.Line, f.Title)
 	var b strings.Builder
 	fmt.Fprintf(&b, "File: %s\n\nFinding (%s, %s) at line %d", f.Path, f.Category, f.Severity, f.Line)
 	if f.EndLine > f.Line {
@@ -553,6 +559,7 @@ func (r *Reviewer) checkResolved(ctx context.Context, t botThread, byName, delta
 		return true, "The file no longer exists.", nil
 	}
 	line := t.line()
+	r.logf("%s:%d: checking whether %q is fixed…", t.Path, line, t.Meta.Title)
 	var b strings.Builder
 	fmt.Fprintf(&b, "File: %s\n\nOriginal finding (%s, %s) near line %d:\nTitle: %s\nComment:\n<<<\n%s\n>>>\n",
 		t.Path, t.Meta.Category, t.Meta.Severity, line, t.Meta.Title, stripMarker(t.FirstBody))

@@ -44,8 +44,9 @@ type Provider struct {
 	APIKeyEnv   string   `json:"api_key_env,omitempty"` // env var holding the key
 	NumCtx      int      `json:"num_ctx,omitempty"`     // ollama only
 	Temperature *float64 `json:"temperature,omitempty"` // default 0.1 for ollama, provider default otherwise
-	MaxTokens   int      `json:"max_tokens,omitempty"`  // anthropic: default 8192
+	MaxTokens   int      `json:"max_tokens,omitempty"`  // output limit; see outputLimit
 	JSONMode    *bool    `json:"json_mode,omitempty"`   // openai: send response_format (default true)
+	Think       *bool    `json:"think,omitempty"`       // ollama: turn a model's thinking on or off (default: the model's own)
 }
 
 type preset struct{ api, baseURL, keyEnv string }
@@ -406,7 +407,18 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 		if p.Temperature != nil {
 			opts["temperature"] = *p.Temperature
 		}
+		// Without a limit, a model that keeps writing after its answer runs
+		// until the bot's timeout: Ollama shifts the context and carries on.
+		opts["num_predict"] = outputLimit(p)
 		body = map[string]any{"model": p.Model, "messages": msgs, "stream": false, "format": "json", "options": opts}
+		if p.Think != nil {
+			body["think"] = *p.Think
+		}
+		if p.NumCtx > 0 {
+			if est := estimateTokens(msgs); est > p.NumCtx {
+				c.logf("warning: prompt is ~%d tokens but %s's context is %d; Ollama will drop the start of it (raise LLM_NUM_CTX or lower REVIEW_FULL_FILE_LINES)", est, p.Name, p.NumCtx)
+			}
+		}
 		if p.APIKey != "" {
 			headers["Authorization"] = "Bearer " + p.APIKey
 		}
@@ -420,6 +432,7 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	started := time.Now()
 	resp, err := c.http().Do(req)
 	if err != nil {
 		return "", ctx.Err() == nil && !isConnRefused(err), fmt.Errorf("request: %w", err)
@@ -450,6 +463,9 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 		}
 	}
 
+	elapsed := time.Since(started)
+	var text string
+	var st stats
 	switch p.API {
 	case "anthropic":
 		var r struct {
@@ -457,6 +473,10 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
@@ -467,26 +487,109 @@ func (c *Client) once(ctx context.Context, i int, p Provider, msgs []Message) (s
 				b.WriteString(part.Text)
 			}
 		}
-		return b.String(), false, nil
+		text = b.String()
+		st = stats{promptTokens: r.Usage.InputTokens, outputTokens: r.Usage.OutputTokens}
 	case "openai":
 		var r struct {
 			Choices []struct {
 				Message Message `json:"message"`
 			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil || len(r.Choices) == 0 {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
 		}
-		return r.Choices[0].Message.Content, false, nil
+		text = r.Choices[0].Message.Content
+		st = stats{promptTokens: r.Usage.PromptTokens, outputTokens: r.Usage.CompletionTokens}
 	default:
 		var r struct {
-			Message Message `json:"message"`
+			Message struct {
+				Content  string `json:"content"`
+				Thinking string `json:"thinking"`
+			} `json:"message"`
+			PromptEvalCount    int    `json:"prompt_eval_count"`
+			PromptEvalDuration int64  `json:"prompt_eval_duration"`
+			EvalCount          int    `json:"eval_count"`
+			EvalDuration       int64  `json:"eval_duration"`
+			LoadDuration       int64  `json:"load_duration"`
+			DoneReason         string `json:"done_reason"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return "", false, fmt.Errorf("unexpected response: %s", truncate(string(data), 300))
 		}
-		return r.Message.Content, false, nil
+		text = r.Message.Content
+		st = stats{
+			promptTokens: r.PromptEvalCount, promptDur: time.Duration(r.PromptEvalDuration),
+			outputTokens: r.EvalCount, outputDur: time.Duration(r.EvalDuration),
+			loadDur: time.Duration(r.LoadDuration), thinkingChars: len(r.Message.Thinking),
+		}
+		if p.NumCtx > 0 && r.PromptEvalCount >= p.NumCtx-16 {
+			c.logf("warning: the prompt filled %s's whole %d-token context, so Ollama dropped part of it (raise LLM_NUM_CTX or lower REVIEW_FULL_FILE_LINES)", p.Name, p.NumCtx)
+		}
+		if r.DoneReason == "length" {
+			c.logf("  %s (%s): %s in %.1fs", p.Name, p.Model, st, elapsed.Seconds())
+			// Usually a model that kept going after its JSON. Keep the reply if
+			// the JSON in it is complete; otherwise give up on this call.
+			if json.Valid([]byte(ExtractJSON(text))) {
+				c.logf("warning: %s hit the %d-token output limit; using the complete JSON at the start of its reply", p.Name, outputLimit(p))
+				return text, false, nil
+			}
+			return "", false, &requestError{fmt.Sprintf("reply hit the %d-token output limit before finishing (raise LLM_MAX_TOKENS if the model needs more)", outputLimit(p))}
+		}
 	}
+	c.logf("  %s (%s): %s in %.1fs", p.Name, p.Model, st, elapsed.Seconds())
+	return text, false, nil
+}
+
+// outputLimit is the most tokens an Ollama reply may use. A findings list
+// needs far less than 2048; a model that thinks needs room for that too.
+func outputLimit(p Provider) int {
+	switch {
+	case p.MaxTokens > 0:
+		return p.MaxTokens
+	case p.Think != nil && !*p.Think:
+		return 2048
+	default:
+		return 8192
+	}
+}
+
+// stats is what a provider reports about one call.
+type stats struct {
+	promptTokens, outputTokens int
+	promptDur, outputDur       time.Duration // ollama only
+	loadDur                    time.Duration // ollama only: time to load the model
+	thinkingChars              int           // ollama only
+}
+
+func (s stats) String() string {
+	rate := func(n int, d time.Duration) string {
+		if n == 0 || d <= 0 {
+			return ""
+		}
+		return fmt.Sprintf(" (%.0f tok/s)", float64(n)/d.Seconds())
+	}
+	out := fmt.Sprintf("prompt %d tok%s, output %d tok%s", s.promptTokens, rate(s.promptTokens, s.promptDur), s.outputTokens, rate(s.outputTokens, s.outputDur))
+	if s.thinkingChars > 0 {
+		out += fmt.Sprintf(", %d chars of thinking", s.thinkingChars)
+	}
+	if s.loadDur > time.Second {
+		out += fmt.Sprintf(", model load %.1fs", s.loadDur.Seconds())
+	}
+	return out
+}
+
+// estimateTokens is a rough count for a prompt: code and English average
+// about 3.5 characters per token.
+func estimateTokens(msgs []Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n * 2 / 7
 }
 
 func isConnRefused(err error) bool {

@@ -45,6 +45,7 @@ A comment looks like this:
 - [Quick start](#quick-start)
 - [Install](#install)
 - [Model providers and fallback](#model-providers-and-fallback)
+- [Performance](#performance)
 - [Configuration](#configuration)
 - [Security](#security)
 - [Limitations](#limitations)
@@ -175,7 +176,8 @@ Failover works like this:
 | `api_key_env` | read the key from this variable instead of the default |
 | `num_ctx` | Ollama context window (default 16384) |
 | `temperature` | default 0.1 for Ollama. Other APIs use the provider's default, since some newer hosted models reject custom values. |
-| `max_tokens` | Anthropic only (default 8192) |
+| `think` | Ollama only: `false` turns a thinking model's reasoning off, `true` turns it on |
+| `max_tokens` | output limit per reply. Ollama: 2048 with `think: false`, otherwise 8192. Anthropic: 8192. |
 | `json_mode` | OpenAI-compatible only. Sends `response_format` (default true) and turns it off automatically if the server rejects it. |
 
 `api_key` also works, but keep keys out of the JSON and pass each one as its
@@ -185,6 +187,44 @@ own secret.
 
 > **A hosted provider receives your code.** List it last if you only want it
 > when your own servers are down.
+
+## Performance
+
+A review makes one model call per changed file per check, plus one per finding
+to verify it. Each line in the log shows a call's prompt and output tokens with
+speeds, so you can see where the time goes:
+
+```
+review-bot: internal/review/review.go [bugs]: waiting on the model…
+review-bot:   ollama@gpu-box:11434 (qwen3-coder:30b): prompt 9120 tok (1450 tok/s), output 212 tok (71 tok/s) in 9.4s
+```
+
+If it's slow:
+
+- **Turn off thinking.** Reasoning models write thousands of hidden tokens
+  before every answer. If the log shows "chars of thinking", set
+  `LLM_THINK=false`.
+- **Prefer a mixture-of-experts coding model.** `qwen3-coder:30b` activates
+  only about 3B parameters per token, so it usually generates faster than a
+  dense 7–9B model. It also doesn't think, and it's better at code. It needs
+  about 20 GB of memory.
+- **Use a 4-bit quantization** if the model offers one: generation speed is
+  mostly limited by memory bandwidth, so a smaller model file is faster.
+- **Make fewer calls while testing:** `REVIEW_CHECKS=bugs` and
+  `REVIEW_VERIFY=false`.
+- **Runaway replies are capped.** Some models keep writing after their answer,
+  and Ollama has no limit by default, so one call could run until the
+  timeout. The bot caps each reply (`LLM_MAX_TOKENS`). When a reply hits the
+  cap, it keeps the answer if the JSON is complete, and otherwise skips that
+  call with a warning.
+- **Watch for the context warning.** If a prompt is larger than `LLM_NUM_CTX`,
+  Ollama silently drops its start and the model reviews part of the file. The
+  bot logs a warning when that happens. Raise `LLM_NUM_CTX` or lower
+  `REVIEW_FULL_FILE_LINES`.
+
+The checks for a file share the same prompt up to their instructions, so
+Ollama reuses its cached reading of the file and the second check starts
+almost straight away.
 
 ## Configuration
 
@@ -200,6 +240,8 @@ Everything is set through environment variables.
 | `LLM_API_KEY` | | key for the single provider |
 | `LLM_NUM_CTX` | `16384` | Ollama context window. Ollama's own default is too small for whole-file context. |
 | `LLM_TEMPERATURE` | | |
+| `LLM_THINK` | the model's default | `false` turns off "thinking" for Ollama models that do it (Qwen3, DeepSeek-R1, …). Much faster. Also applies to Ollama entries in `LLM_PROVIDERS` without their own `think`. |
+| `LLM_MAX_TOKENS` | see `max_tokens` | output limit per reply, for the single provider and for `LLM_PROVIDERS` entries without their own |
 | `LLM_TIMEOUT` | `10m` | per model call. Connecting to a server times out after 5s. |
 | `REVIEW_CHECKS` | `bugs,security` | |
 | `REVIEW_MIN_SEVERITY` | `low` | `low`, `medium`, `high`, `critical` |
