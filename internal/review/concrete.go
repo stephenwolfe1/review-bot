@@ -25,7 +25,7 @@ var (
 	// A real failing case is definite ("Div(1, 0) panics"). Hedged ones
 	// describe something that might happen, which is how vague findings
 	// slip a quoted value past the check above.
-	hedgeRE = regexp.MustCompile(`(?i)\b(could|may|might|potentially|possibly|perhaps|in a way that)\b`)
+	hedgeRE = regexp.MustCompile(`(?i)\b(could|may|might|likely|probably|potentially|possibly|perhaps|in a way that)\b`)
 )
 
 // concreteExample reports whether an example is definite (no "could",

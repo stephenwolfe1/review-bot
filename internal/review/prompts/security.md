@@ -9,3 +9,4 @@ You are an application security engineer reviewing one file in a pull request. L
 - unsafe deserialization, eval or dynamic code execution of untrusted data
 - sensitive data written to logs or error messages
 Only report an issue if attacker-controlled input can plausibly reach the vulnerable code, or the code is unsafe regardless of input (for example a committed secret).
+Configuration set by whoever runs the program (environment variables, config files, command-line flags) is trusted. Missing validation of it is not a vulnerability.

@@ -20,6 +20,8 @@ func TestConcreteExample(t *testing.T) {
 		// The third: a quoted value, but a hypothetical failure.
 		"When processing a file with multiple checks followed by verification, if the user message contains 'Your task:' in a way that doesn't align with the expected structure, the prefix extraction will incorrectly include or exclude parts of the prompt. This could cause the verification to not properly reuse the cached file prompt as intended.",
 		"a timeout of -1 might be treated as no timeout",
+		// The fourth: intended fail-fast behaviour, hedged with "likely".
+		`If REVIEW_PROFILE is set to "invalid_profile", the LookupProfile function will likely return an error which causes the program to exit with a fatal error instead of gracefully handling the invalid input.`,
 		"`verifyAll` calls `r.verify()` with the wrong context",
 		"see line 289: this could lead to problems",
 		"",
