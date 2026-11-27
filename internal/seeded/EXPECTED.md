@@ -19,7 +19,7 @@ suspicious. Run review-bot against the PR and score it.
 | S1 | 110 | security | critical | SQL injection: `?name=x' OR '1'='1` returns every user |
 | S2 | 133 | security | critical/high | path traversal: `?file=../../etc/passwd` reads outside `baseDir` |
 | S3 | 155 | security | critical | command injection: `img=a.png; rm -rf ~` runs in a shell |
-| S4 | 16 | security | high | hard-coded admin password in source |
+| S4 | 16, 165 | security | high | hard-coded admin password in source, and the comparison that uses it |
 | S5 | 175 | security | high | TLS certificate checks disabled for the payment client |
 
 ## Decoys (should get no comments)
