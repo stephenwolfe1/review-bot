@@ -89,6 +89,7 @@ func main() {
 		MaxComments:   envInt("REVIEW_MAX_COMMENTS", 15),
 		FailOn:        strings.ToLower(env("REVIEW_FAIL_ON", "")),
 		ReviewDrafts:  envBool("REVIEW_DRAFTS", false),
+		BotLogins:     splitList(env("REVIEW_BOT_LOGIN", strings.Join(review.DefaultBotLogins, ","))),
 		Force:         *force,
 		DryRun:        *dry,
 		Logger:        logger,

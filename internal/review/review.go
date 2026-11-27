@@ -42,9 +42,12 @@ type Config struct {
 	MaxComments   int
 	FailOn        string // severity; "" disables
 	ReviewDrafts  bool
-	Force         bool // review even if head was already reviewed
-	DryRun        bool
-	Logger        *log.Logger
+	// BotLogins are the accounts whose comments count as the bot's own. Only
+	// their hidden markers are trusted, so a PR author can't forge them.
+	BotLogins []string
+	Force     bool // review even if head was already reviewed
+	DryRun    bool
+	Logger    *log.Logger
 }
 
 // DefaultIgnore skips files that are noise for review.
@@ -133,9 +136,15 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 	}
 	var bot []botThread
 	for _, t := range threads {
-		if m, ok := DecodeMeta(t.FirstBody); ok {
-			bot = append(bot, botThread{Thread: t, Meta: m})
+		m, ok := DecodeMeta(t.FirstBody)
+		if !ok {
+			continue
 		}
+		if !r.isBot(t.FirstAuthor) {
+			r.logf("ignoring a review-bot marker in a thread by %q (not the bot)", t.FirstAuthor)
+			continue
+		}
+		bot = append(bot, botThread{Thread: t, Meta: m})
 	}
 
 	comments, err := r.GH.ListIssueComments(ctx, cfg.PR)
@@ -145,9 +154,15 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 	var summaryID int64
 	var lastSHA string
 	for _, c := range comments {
-		if sha, ok := ParseSummary(c.Body); ok {
-			summaryID, lastSHA = c.ID, sha
+		sha, ok := ParseSummary(c.Body)
+		if !ok {
+			continue
 		}
+		if !r.isBot(c.User.Login) {
+			r.logf("ignoring a review-bot summary marker in a comment by %q (not the bot)", c.User.Login)
+			continue
+		}
+		summaryID, lastSHA = c.ID, sha
 	}
 	if lastSHA == head && !cfg.Force {
 		r.logf("head %s already reviewed", short(head))
@@ -203,7 +218,7 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 			}
 			r.logf("resolving %s:%d %q: %s", t.Path, t.line(), t.Meta.Title, reason)
 			if !cfg.DryRun {
-				body := fmt.Sprintf("✅ Addressed in %s. %s", short(head), reason)
+				body := fmt.Sprintf("✅ Addressed in %s. %s", short(head), sanitizeText(oneLine(reason)))
 				if err := r.GH.ReplyToThread(ctx, t.ID, body); err != nil {
 					r.logf("reply: %v", err)
 				}
@@ -403,6 +418,10 @@ func (r *Reviewer) filter(in []Finding, patches map[string]*diff.Patch, bot []bo
 			}
 			f.EndLine = f.Line
 		}
+		if f.Suggestion != "" && suggestionTooBig(f.Suggestion, f.EndLine-f.Line+1) {
+			r.logf("dropped the suggestion for %s:%d: much larger than the lines it replaces", f.Path, f.Line)
+			f.Suggestion = ""
+		}
 		if dupOfThread(f, bot) {
 			r.logf("skipped %s:%d %q: already raised", f.Path, f.Line, f.Title)
 			continue
@@ -597,9 +616,13 @@ var sevIcon = map[string]string{"critical": "🛑", "high": "🔴", "medium": "�
 
 func toComment(f Finding, head, model string) gh.ReviewComment {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s **%s · %s** — %s\n\n%s\n", sevIcon[f.Severity], title(f.Severity), title(f.Category), f.Title, strings.TrimSpace(f.Body))
+	// Title and body come from the model, so they're sanitized; the
+	// suggestion sits in a code block, where Markdown isn't rendered.
+	fmt.Fprintf(&b, "%s **%s · %s** — %s\n\n%s\n", sevIcon[f.Severity], title(f.Severity), title(f.Category),
+		sanitizeText(oneLine(f.Title)), sanitizeText(strings.TrimSpace(f.Body)))
 	if s := strings.TrimRight(f.Suggestion, "\n"); s != "" && !strings.Contains(s, "```") {
 		fmt.Fprintf(&b, "\n```suggestion\n%s\n```\n", s)
+		b.WriteString("<sub>⚠️ Written by an AI model. Read the change before applying it.</sub>\n")
 	}
 	fmt.Fprintf(&b, "\n<sub>review-bot · %s</sub>\n", model)
 	b.WriteString(EncodeMeta(Meta{Severity: f.Severity, Category: f.Category, Title: f.Title, Path: f.Path, Line: f.Line, SHA: head}))
@@ -619,6 +642,31 @@ func (r *Reviewer) lastModel() string {
 	}
 	return r.LLM.Current()
 }
+
+// isBot reports whether login is one of the bot's accounts. GitHub shows
+// app accounts as "name[bot]" in REST and "name" in GraphQL, so both match.
+func (r *Reviewer) isBot(login string) bool {
+	norm := func(s string) string { return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "[bot]")) }
+	l := norm(login)
+	if l == "" {
+		return false
+	}
+	logins := r.Cfg.BotLogins
+	if len(logins) == 0 {
+		logins = DefaultBotLogins
+	}
+	for _, b := range logins {
+		if norm(b) == l {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultBotLogins is the account GITHUB_TOKEN posts as.
+var DefaultBotLogins = []string{"github-actions[bot]"}
+
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func countOpen(bot []botThread, resolvedNow map[string]bool) map[string]map[string]int {
 	m := map[string]map[string]int{}
