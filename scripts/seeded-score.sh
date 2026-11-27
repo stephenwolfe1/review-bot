@@ -62,9 +62,11 @@ decoys=$(sed 's/–/-/g' "$key" | awk -F'|' '
 
 [ -n "$planted" ] || { echo "no planted rows found in $key" >&2; exit 2; }
 
-result=$(awk -v window="$window" -v P="$planted" -v D="$decoys" -v C="$comments" '
+# The tables go in through the environment: macOS awk rejects multi-line -v values.
+result=$(SEED_P="$planted" SEED_D="$decoys" SEED_C="$comments" awk -v window="$window" '
   function abs(x) { return x < 0 ? -x : x }
   BEGIN {
+    P = ENVIRON["SEED_P"]; D = ENVIRON["SEED_D"]; C = ENVIRON["SEED_C"]
     np = split(P, prow, "\n"); nd = split(D, drow, "\n"); nc = (C == "") ? 0 : split(C, crow, "\n")
     for (i = 1; i <= nc; i++) { split(crow[i], f, " "); cl[i] = f[1]; cs[i] = f[2]; cc[i] = f[3]; used[i] = 0 }
     caught = 0
