@@ -219,6 +219,9 @@ locally, they come from `-repo owner/name` and `-pr N`.
 
 ## Security
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md). Please don't open
+a public issue.
+
 - **Only attach self-hosted runners to private repositories.** A runner on your
   network shouldn't take jobs from untrusted code. The example workflow also
   skips PRs from forks.
@@ -259,7 +262,7 @@ unfixed ones open, and provider failover.
 
 **Releases** use [release-please](https://github.com/googleapis/release-please):
 
-1. Commit to `develop` with
+1. Commit to `main` with
    [conventional commit](https://www.conventionalcommits.org/) messages
    (`feat:`, `fix:`, …).
 2. release-please keeps a release PR open with the next version and

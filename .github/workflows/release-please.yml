@@ -1,6 +1,6 @@
 name: release-please
 
-# On every merge to develop, release-please keeps a release PR up to date: the
+# On every merge to main, release-please keeps a release PR up to date: the
 # next version (from conventional commit messages) and CHANGELOG.md. Merging
 # that PR tags vX.Y.Z and creates the GitHub release; the jobs below then
 # publish the image and binaries for that tag.
@@ -9,7 +9,7 @@ name: release-please
 # creates with GITHUB_TOKEN doesn't trigger other workflows.
 on:
   push:
-    branches: [develop]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
