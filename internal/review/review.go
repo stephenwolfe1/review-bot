@@ -236,13 +236,15 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 			}
 			r.logf("resolving %s:%d %q: %s", t.Path, t.line(), t.Meta.Title, reason)
 			if !cfg.DryRun {
+				// Resolve first and reply only if that worked: a reply on a
+				// thread left open would be posted again on every run.
+				if err := r.GH.ResolveThread(ctx, t.ID); err != nil {
+					r.logf("resolve %s:%d: %v%s", t.Path, t.line(), err, resolveHint(err))
+					continue
+				}
 				body := fmt.Sprintf("✅ Addressed in %s. %s", short(head), sanitizeText(oneLine(reason)))
 				if err := r.GH.ReplyToThread(ctx, t.ID, body); err != nil {
 					r.logf("reply: %v", err)
-				}
-				if err := r.GH.ResolveThread(ctx, t.ID); err != nil {
-					r.logf("resolve: %v", err)
-					continue
 				}
 			}
 			resolved[t.ID] = true
@@ -302,6 +304,9 @@ func (r *Reviewer) Run(ctx context.Context) (*Result, error) {
 		// Filter and verify this file's findings straight away, while the
 		// model server still has this file's prompt cached.
 		kept := r.filter(raw, patches, bot)
+		for i := range kept {
+			kept[i].Suggestion = reindent(kept[i].Suggestion, content, kept[i].Line)
+		}
 		if cfg.Verify {
 			kept = r.verifyAll(ctx, fc, kept, content)
 		}
@@ -782,6 +787,16 @@ func (r *Reviewer) isBot(login string) bool {
 
 // DefaultBotLogins is the account GITHUB_TOKEN posts as.
 var DefaultBotLogins = []string{"github-actions[bot]"}
+
+// resolveHint explains the usual cause of a failed resolve: the workflow's
+// GITHUB_TOKEN can comment with pull-requests: write, but resolving a review
+// thread also needs contents: write.
+func resolveHint(err error) string {
+	if strings.Contains(err.Error(), "Resource not accessible by integration") {
+		return " (the workflow needs \"contents: write\" in its permissions to resolve threads)"
+	}
+	return ""
+}
 
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
