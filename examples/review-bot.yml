@@ -5,6 +5,8 @@
 #   Secrets:    LLM_BASE_URL   e.g. http://ollama-1:11434,http://ollama-2:11434
 #                              (tried in order), or instead
 #               LLM_PROVIDERS  JSON list of providers (see the README)
+#               LLM_API_KEY    only if Ollama sits behind an authenticating
+#                              proxy (sent as a Bearer token)
 #               ANTHROPIC_API_KEY / OPENAI_API_KEY / ...  only for hosted
 #                              providers listed in LLM_PROVIDERS
 #   Variables:  LLM_MODEL      e.g. qwen3-coder:30b (with LLM_BASE_URL)
@@ -20,7 +22,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  contents: read
+  contents: write # resolving review threads needs it; the bot never pushes
   pull-requests: write
 
 concurrency:
@@ -48,6 +50,7 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
           LLM_PROVIDERS: ${{ secrets.LLM_PROVIDERS }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           # Only needed for hosted providers in LLM_PROVIDERS; unset secrets are empty.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

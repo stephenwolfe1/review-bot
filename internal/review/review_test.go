@@ -38,6 +38,9 @@ type fakeGitHub struct {
 	threads  []*fakeThread
 	reviews  int
 	nextID   int64
+	// denyResolve answers resolveReviewThread the way GitHub does when the
+	// workflow token lacks contents: write.
+	denyResolve bool
 }
 
 func (f *fakeGitHub) handler() http.Handler {
@@ -147,6 +150,8 @@ func (f *fakeGitHub) handler() http.Handler {
 				}
 			}
 			j(w, map[string]any{"data": map[string]any{}})
+		case strings.Contains(req.Query, "resolveReviewThread") && f.denyResolve:
+			j(w, map[string]any{"errors": []any{map[string]any{"message": "Resource not accessible by integration"}}})
 		case strings.Contains(req.Query, "resolveReviewThread"):
 			for _, t := range f.threads {
 				if t.ID == req.Variables["id"] {
@@ -339,6 +344,32 @@ func TestReviewThenResolve(t *testing.T) {
 	}
 	if len(fg.comments) != 1 || !strings.Contains(fg.comments[0].Body, "sha=bbbbbbb2222222") || !strings.Contains(fg.comments[0].Body, "1 resolved") {
 		t.Fatalf("summary after fix: %s", fg.comments[0].Body)
+	}
+}
+
+// A failed resolve must not leave a reply behind: the thread stays open, so
+// every later run would reply again.
+func TestFailedResolvePostsNoReply(t *testing.T) {
+	fg, _, r := setup(t)
+	ctx := context.Background()
+	if _, err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	r.Cfg.Logger = log.New(&logs, "", 0)
+	fg.denyResolve = true
+	fg.head = "bbbbbbb2222222"
+	fg.files[0].Patch = p2
+	res, err := r.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th := fg.threads[0]
+	if res.Resolved != 0 || th.Resolved || len(th.Bodies) != 1 {
+		t.Fatalf("after a denied resolve: %+v thread=%+v", res, th)
+	}
+	if !strings.Contains(logs.String(), `needs "contents: write"`) {
+		t.Errorf("no permission hint in the log:\n%s", logs.String())
 	}
 }
 

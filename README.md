@@ -202,6 +202,16 @@ own secret.
 
 </details>
 
+**Ollama behind a proxy.** Ollama has no authentication or TLS of its own, so
+to keep it off the open network, put a reverse proxy in front of it (Caddy,
+nginx) that requires a key, and let Ollama listen on localhost only. Set
+`LLM_BASE_URL=https://ollama.example.com:8443` and `LLM_API_KEY` to the key;
+the bot sends it as `Authorization: Bearer …`. In `LLM_PROVIDERS`, use
+`"api_key_env": "LLM_API_KEY"` (or any variable name) on that provider.
+Ollama bound to localhost rejects requests whose `Host` header isn't
+localhost, so the proxy has to rewrite it (Caddy:
+`header_up Host localhost:11434`).
+
 > **A hosted provider receives your code.** List it last if you only want it
 > when your own servers are down.
 
@@ -335,9 +345,12 @@ a public issue.
 - **Only attach self-hosted runners to private repositories.** A runner on your
   network shouldn't take jobs from untrusted code. The example workflow also
   skips PRs from forks.
-- **Least privilege.** The workflow needs only `contents: read` and
-  `pull-requests: write`. The bot never checks out or runs the PR's code. It
-  reads diffs and files through the API.
+- **Least privilege.** The workflow needs `pull-requests: write` to comment and
+  `contents: write`, because GitHub refuses to let the Actions token resolve
+  review threads without it ("Resource not accessible by integration"). The
+  bot never pushes, and never checks out or runs the PR's code: it reads diffs
+  and files through the API. With `contents: read` everything works except
+  resolving.
 - **The model's output is untrusted.** A PR can try to steer the model with
   instructions hidden in code or comments (prompt injection). The prompts tell
   the model to ignore them, and the bot limits what a steered model can do:
@@ -375,9 +388,9 @@ a public issue.
 - Test code and documentation are skipped by default (`REVIEW_TESTS`,
   `REVIEW_DOCS`). Models tend to judge test fakes as if they were production
   code.
-- Resolving threads uses `GITHUB_TOKEN` with `pull-requests: write`. If GitHub
-  ever refuses that mutation for the Actions token, use a GitHub App token
-  instead.
+- Resolving threads needs `contents: write` on `GITHUB_TOKEN` (see
+  [Security](#security)). Without it, fixed findings are logged as resolved
+  but their threads stay open and get no reply.
 
 ## Development
 
